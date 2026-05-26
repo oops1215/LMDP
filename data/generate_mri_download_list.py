@@ -67,7 +67,8 @@ def extract_imageids_from_fs(rda_dir: str) -> pd.DataFrame:
     """
     fs_files = [
         "UCSFFSX.rda",
-        "UCSFFSX51ALL.rda",
+        "UCSFFSX51.rda",        # ADNI1/GO/2 (실제 파일명)
+        "UCSFFSX51ALL.rda",     # 일부 배포판의 대체 파일명
         "UCSFFSX51_ADNI1_3T.rda",
         "UCSFFSX6.rda",
         "UCSFFSX7.rda",
