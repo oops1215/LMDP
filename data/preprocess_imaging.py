@@ -387,6 +387,91 @@ def preprocess_all(mri_raw_dir: str   = Config.MRI_RAW_DIR,
     print(f"PET 完成: {pet_ok} 成功，{pet_fail} 失败")
 
 
+# ─── IDA 下载整理：按 Image ID 选出正确文件，重命名为 PTID_VISCODE.nii.gz ────
+
+def organize_mri_from_ida(
+        download_dir: str,
+        output_dir: str,
+        download_list_csv: str = "data/mri_download_list.csv",
+        dry_run: bool = False,
+) -> None:
+    """
+    从 ADNI IDA 下载目录中，只挑选 mri_download_list.csv 里记录的 Image ID，
+    重命名/复制到 output_dir/{PTID}_{VISCODE}.nii.gz。
+
+    IDA 批量下载会包含 Repeat 扫描和多余访视，本函数通过 Image ID 精确过滤，
+    只保留 FreeSurfer 实际使用的那张图。
+
+    ADNI NIfTI 文件名或目录中包含 "I{IMAGEUID}" 模式，例如：
+      - 002_S_0413_MR_2005-09-08_I45102.nii
+      - .../I45102/file.nii
+
+    参数
+    ----
+    download_dir      : IDA 解压后的根目录（会递归搜索 .nii / .nii.gz）
+    output_dir        : 整理后的输出目录（preprocess_imaging 的 mri_raw_dir）
+    download_list_csv : generate_mri_download_list.py 生成的 CSV，含 PTID/VISCODE/IMAGEUID
+    dry_run           : True = 只打印操作，不复制文件（先检查再实际运行）
+    """
+    import re
+    import shutil
+    import pandas as pd
+
+    dl = pd.read_csv(download_list_csv)
+    # 建立 IMAGEUID → (PTID, VISCODE) 的查找表
+    dl["IMAGEUID"] = pd.to_numeric(dl["IMAGEUID"], errors="coerce").astype("Int64")
+    dl = dl.dropna(subset=["IMAGEUID", "PTID", "VISCODE"])
+    uid_map = {int(row["IMAGEUID"]): (str(row["PTID"]), str(row["VISCODE"]))
+               for _, row in dl.iterrows()}
+    print(f"下载清单: {len(uid_map)} 条 Image ID")
+
+    # 递归找所有 NIfTI
+    all_nii = []
+    for root, _, files in os.walk(download_dir):
+        for f in files:
+            if f.endswith(".nii") or f.endswith(".nii.gz"):
+                all_nii.append(os.path.join(root, f))
+    print(f"下载目录中找到 {len(all_nii)} 个 NIfTI 文件")
+
+    os.makedirs(output_dir, exist_ok=True)
+    copied, skipped_repeat, skipped_exists = 0, 0, 0
+
+    for filepath in sorted(all_nii):
+        # 从文件名或路径中提取 Image ID（格式：I\d+）
+        match = re.search(r"[_/\\]I(\d+)", filepath)
+        if match is None:
+            # 有些文件名格式不同，尝试仅数字模式
+            match = re.search(r"I(\d+)", os.path.basename(filepath))
+        if match is None:
+            print(f"  [跳过] 无法提取 Image ID: {os.path.basename(filepath)}")
+            continue
+
+        image_id = int(match.group(1))
+        if image_id not in uid_map:
+            skipped_repeat += 1  # Repeat 或不在目标访视列表里
+            continue
+
+        ptid, viscode = uid_map[image_id]
+        ext = ".nii.gz" if filepath.endswith(".nii.gz") else ".nii"
+        out_name = f"{ptid}_{viscode}{ext}"
+        out_path  = os.path.join(output_dir, out_name)
+
+        if os.path.exists(out_path):
+            skipped_exists += 1
+            continue
+
+        if dry_run:
+            print(f"  [DRY] {os.path.basename(filepath)} → {out_name}")
+        else:
+            shutil.copy2(filepath, out_path)
+        copied += 1
+
+    action = "将复制" if dry_run else "已复制"
+    print(f"\n{action}: {copied}  |  跳过(重复/无关): {skipped_repeat}  |  已存在: {skipped_exists}")
+    if dry_run:
+        print("（dry_run 模式，未实际操作。去掉 --dry_run 后正式运行）")
+
+
 # ─── 验证单张图像（可视化检查）──────────────────────────────────────────────
 
 def visualize_preprocessed(npy_path: str, slice_idx: int = 64) -> None:
@@ -406,25 +491,49 @@ def visualize_preprocessed(npy_path: str, slice_idx: int = 64) -> None:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="LMDP-Net 图像预处理")
-    parser.add_argument("--mri_dir",  default=Config.MRI_RAW_DIR)
-    parser.add_argument("--pet_dir",  default=Config.PET_RAW_DIR)
-    parser.add_argument("--transform", default="SyN",
-                        choices=["SyN", "Affine"],
-                        help="SyN=精度高/慢，Affine=速度快/精度略低")
-    parser.add_argument("--pet_mri_ref", action="store_true",
-                        help="PET 先对齐到 MRI 再到 MNI（未 co-reg PET 使用此选项）")
-    parser.add_argument("--n4", action="store_true",
-                        help=(
-                            "对 MRI 做 N4 偏场校正。\n"
-                            "原始 MPRAGE 下载时使用；\n"
-                            "若下载的是 'MPR; GradWarp; B1 Correction; N3; Scaled' 则无需此选项。"
-                        ))
+    subparsers = parser.add_subparsers(dest="command")
+
+    # ── 子命令 1: organize（整理 IDA 下载）──────────────────────────────────
+    p_org = subparsers.add_parser("organize",
+        help="从 IDA 下载目录按 Image ID 挑出正确文件，重命名到 mri_raw/")
+    p_org.add_argument("--download_dir", required=True,
+                       help="IDA 解压后的根目录")
+    p_org.add_argument("--output_dir", default=Config.MRI_RAW_DIR,
+                       help="整理后的输出目录（默认 data/mri_raw）")
+    p_org.add_argument("--download_list", default="data/mri_download_list.csv",
+                       help="generate_mri_download_list.py 生成的 CSV")
+    p_org.add_argument("--dry_run", action="store_true",
+                       help="只打印操作，不复制文件")
+
+    # ── 子命令 2: preprocess（预处理）───────────────────────────────────────
+    p_pre = subparsers.add_parser("preprocess",
+        help="对 mri_raw/ 中的 NIfTI 文件做配准/裁剪/归一化")
+    p_pre.add_argument("--mri_dir",  default=Config.MRI_RAW_DIR)
+    p_pre.add_argument("--pet_dir",  default=Config.PET_RAW_DIR)
+    p_pre.add_argument("--transform", default="SyN",
+                       choices=["SyN", "Affine"],
+                       help="SyN=精度高/慢，Affine=速度快/精度略低")
+    p_pre.add_argument("--pet_mri_ref", action="store_true",
+                       help="PET 先对齐到 MRI 再到 MNI（未 co-reg PET 用此选项）")
+    p_pre.add_argument("--n4", action="store_true",
+                       help="对 MRI 做 N4 偏场校正（原始 MPRAGE 使用，N3-Scaled 无需）")
+
     args = parser.parse_args()
 
-    preprocess_all(
-        mri_raw_dir=args.mri_dir,
-        pet_raw_dir=args.pet_dir,
-        transform_type=args.transform,
-        pet_use_mri_ref=args.pet_mri_ref,
-        apply_n4=args.n4,
-    )
+    if args.command == "organize":
+        organize_mri_from_ida(
+            download_dir=args.download_dir,
+            output_dir=args.output_dir,
+            download_list_csv=args.download_list,
+            dry_run=args.dry_run,
+        )
+    elif args.command == "preprocess":
+        preprocess_all(
+            mri_raw_dir=args.mri_dir,
+            pet_raw_dir=args.pet_dir,
+            transform_type=args.transform,
+            pet_use_mri_ref=args.pet_mri_ref,
+            apply_n4=args.n4,
+        )
+    else:
+        parser.print_help()
