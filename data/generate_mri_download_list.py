@@ -121,28 +121,12 @@ def extract_imageids_from_fs(rda_dir: str) -> pd.DataFrame:
 
     combined = pd.concat(frames, ignore_index=True)
 
-    # 同一 RID+VISCODE 可能有多条（ADNI 对同一访视处理了多个扫描）
-    # 按描述优先级排序：standard Scaled > Scaled_2 > 未知 > SENS > repeat
-    # 这样 drop_duplicates(keep="first") 保留的永远是最接近 primary scan 的那条
-    def _scan_priority(desc: str) -> int:
-        d = str(desc).lower()
-        if "repeat" in d or "mpr-r" in d or "-r;" in d:
-            return 10   # repeat — 最不优先
-        if "sens" in d:
-            return 8    # sensitivity variant
-        if "scaled_2" in d or "scaled 2" in d:
-            return 1    # secondary scaling pass，次优
-        if "scaled" in d:
-            return 0    # standard Scaled — 最优先
-        return 5        # 其他未知序列
-
-    combined["_priority"] = combined["PREFERRED_DESC"].apply(_scan_priority)
-    combined = (combined
-                .sort_values(["RID", "VISCODE", "_priority", "IMAGEUID"])
-                .drop_duplicates(subset=["RID", "VISCODE"], keep="first")
-                .drop(columns=["_priority"]))
-    combined = combined.sort_values(["RID","VISCODE"]).reset_index(drop=True)
-    print(f"\n汇总: {len(combined)} 条记录，{combined['RID'].nunique()} 名受试者")
+    # 去除无效 IMAGEUID（QC 过滤已在各分支完成，这里只去重完全相同的行）
+    combined = combined.drop_duplicates(subset=["RID", "VISCODE", "IMAGEUID"])
+    combined = combined.sort_values(["RID", "VISCODE", "IMAGEUID"]).reset_index(drop=True)
+    print(f"\n汇总: {len(combined)} 条候选记录，{combined['RID'].nunique()} 名受试者")
+    # 注意：此时同一 RID+VISCODE 可能有多条（来自不同 rda 文件或同一文件多次扫描）
+    # 最终去重在 pick_best_scan_per_visit() 中基于真实 SEQUENCE 完成
     return combined
 
 
@@ -249,6 +233,45 @@ def _fallback_repeat_filter(df: pd.DataFrame) -> pd.DataFrame:
     return df[~is_unwanted].copy()
 
 
+def _sequence_priority(seq: str) -> int:
+    s = str(seq).lower()
+    if "repeat" in s or "mpr-r" in s:
+        return 10  # repeat/rescan — 最不优先
+    if "sens" in s:
+        return 8
+    if "scaled_2" in s or "scaled 2" in s:
+        return 1   # Scaled_2 备用
+    if "scaled" in s:
+        return 0   # standard Scaled — 最优先
+    return 5
+
+
+def pick_best_scan_per_visit(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    同一 RID+VISCODE 若有多条候选，按真实 SEQUENCE 优先级选最优一条。
+    优先级：Scaled(0) > Scaled_2(1) > 未知(5) > SENS(8) > repeat/MPR-R(10)
+
+    此函数在 filter_by_description 之后调用，此时 SEQUENCE 已由 MRIMETA 填充。
+    若 SEQUENCE 列不存在（回退路径），则直接按 IMAGEUID 升序保留第一条。
+    """
+    col = "SEQUENCE" if "SEQUENCE" in df.columns else None
+    df = df.copy()
+    if col:
+        df["_pri"] = df[col].apply(_sequence_priority)
+    else:
+        df["_pri"] = 5
+
+    n_before = len(df)
+    df = (df.sort_values(["RID", "VISCODE", "_pri", "IMAGEUID"])
+            .drop_duplicates(subset=["RID", "VISCODE"], keep="first")
+            .drop(columns=["_pri"]))
+    df = df.sort_values(["RID", "VISCODE"]).reset_index(drop=True)
+    removed = n_before - len(df)
+    if removed:
+        print(f"  pick_best_scan_per_visit: {n_before} → {len(df)}（丢弃 {removed} 条次优/重复候选）")
+    return df
+
+
 def add_ptid(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     """补充 PTID（若 UCSFFSX 没有，从 REGISTRY 获取）。"""
     if "PTID" in df.columns and df["PTID"].notna().mean() > 0.5:
@@ -280,6 +303,7 @@ def generate_download_list(rda_dir: str, output_path: str) -> None:
         return
 
     df = filter_by_description(df, rda_dir)
+    df = pick_best_scan_per_visit(df)
     df = add_ptid(df, rda_dir)
 
     # 只保留目标访视（论文用 bl/m12/m24/m36/m48/m60）
