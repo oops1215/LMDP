@@ -120,8 +120,27 @@ def extract_imageids_from_fs(rda_dir: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     combined = pd.concat(frames, ignore_index=True)
-    # 同一 RID+VISCODE 保留最新处理结果（最后加载的文件优先）
-    combined = combined.drop_duplicates(subset=["RID","VISCODE"], keep="last")
+
+    # 同一 RID+VISCODE 可能有多条（ADNI 对同一访视处理了多个扫描）
+    # 按描述优先级排序：standard Scaled > Scaled_2 > 未知 > SENS > repeat
+    # 这样 drop_duplicates(keep="first") 保留的永远是最接近 primary scan 的那条
+    def _scan_priority(desc: str) -> int:
+        d = str(desc).lower()
+        if "repeat" in d or "-r;" in d:
+            return 10   # repeat — 最不优先
+        if "sens" in d:
+            return 8    # sensitivity variant
+        if "scaled_2" in d or "scaled 2" in d:
+            return 1    # secondary scaling pass，次优
+        if "scaled" in d:
+            return 0    # standard Scaled — 最优先
+        return 5        # 其他未知序列
+
+    combined["_priority"] = combined["PREFERRED_DESC"].apply(_scan_priority)
+    combined = (combined
+                .sort_values(["RID", "VISCODE", "_priority", "IMAGEUID"])
+                .drop_duplicates(subset=["RID", "VISCODE"], keep="first")
+                .drop(columns=["_priority"]))
     combined = combined.sort_values(["RID","VISCODE"]).reset_index(drop=True)
     print(f"\n汇总: {len(combined)} 条记录，{combined['RID'].nunique()} 名受试者")
     return combined
@@ -133,9 +152,9 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     过滤掉 Repeat 扫描和非目标序列。
 
     ADNI 命名规则：
-      - 正常：MPR; GradWarp; B1 Correction; N3; Scaled
-      - Repeat：MPR-R; GradWarp... 或 SEQUENCE 含 REPEAT / -R
-      - Sensitivity：MPR; ; N3; Scaled 2（SENS / _2 结尾）
+      - 正常：MPR; GradWarp; B1 Correction; N3; Scaled 或 Scaled_2（均为正常 ADNI1 扫描）
+      - Repeat：MPR-R; GradWarp... 或 SEQUENCE 含 REPEAT（关键词）
+      - Sensitivity：MPR; ; N3; Scaled 或含 SENS 关键词
     """
     # 合并 MRIMETA（ADNI1/2/GO）和 MRI3META（ADNI3/4）
     frames = []
@@ -154,8 +173,8 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
             print(f"  [警告] 读取 {fname} 失败: {e}")
 
     if not frames:
-        print("  [提示] 未找到 MRIMETA.rda / MRI3META.rda，跳过 Repeat 过滤")
-        return df
+        print("  [提示] 未找到 MRIMETA.rda / MRI3META.rda，改用关键字回退过滤")
+        return _fallback_repeat_filter(df)
 
     meta = pd.concat(frames, ignore_index=True)
 
@@ -165,9 +184,9 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     desc_col = next((c for c in ["SEQUENCE", "MRITYPE", "SERIESTYPE",
                                   "DESCRIPTION", "IMAGEDESC"] if c in meta.columns), None)
     if id_col is None or desc_col is None:
-        print(f"  [警告] MRIMETA 缺少 Image ID 或描述列，跳过过滤")
+        print(f"  [警告] MRIMETA 缺少 Image ID 或描述列，改用关键字回退过滤")
         print(f"         实际列名: {list(meta.columns[:20])}")
-        return df
+        return _fallback_repeat_filter(df)
 
     print(f"  使用列: {id_col} → {desc_col}")
     print(f"  描述样本: {meta[desc_col].dropna().unique()[:8].tolist()}")
@@ -181,7 +200,9 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     df["SEQUENCE"] = df["IMAGEUID"].map(desc_map).fillna("")
 
     # 过滤 Repeat / Sensitivity / 非 T1 结构像
-    EXCLUDE = r"(?i)(repeat|-R;|_2\b|SENS\b|fmri|dti|dwi|bold|pcasl|asl|flair|swi|t2)"
+    # 注意：不用 _2\b，因为 "Scaled_2" 是 ADNI1 正常扫描的描述后缀
+    # "MPRAGE REPEAT" / "MPR-R;" 才是 repeat 标志；"SENS" / "MPRAGE SENS" 是 sensitivity
+    EXCLUDE = r"(?i)(repeat\b|-R;|\bSENS\b|fmri|dti|dwi|bold|pcasl|asl\b|flair|swi|t2\b)"
     is_unwanted = df["SEQUENCE"].str.contains(EXCLUDE, regex=True, na=False)
     n_before = len(df)
     df = df[~is_unwanted].copy()
@@ -193,7 +214,122 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     return df
 
 
-def add_ptid(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
+def _fallback_repeat_filter(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    当 MRIMETA 不可用时，利用 PREFERRED_DESC（来自 UCSFFSX 文件名推断）
+    做简单的关键字过滤。只能过滤掉明确含 repeat/-R/SENS 关键字的 SEQUENCE，
+    无法对无描述信息的 ID 做判断。
+    """
+    if "PREFERRED_DESC" not in df.columns:
+        return df
+    EXCLUDE = r"(?i)(repeat\b|-R;|\bSENS\b)"
+    is_unwanted = df["PREFERRED_DESC"].str.contains(EXCLUDE, regex=True, na=False)
+    n_bad = is_unwanted.sum()
+    if n_bad:
+        print(f"  回退过滤: 排除 {n_bad} 条含 Repeat/SENS 关键字的记录")
+    return df[~is_unwanted].copy()
+
+
+def filter_by_ida_csv(df: pd.DataFrame, ida_csv_path: str) -> pd.DataFrame:
+    """
+    利用 IDA "Advanced Search Results" 导出的 CSV 做交叉验证。
+
+    该 CSV（CSV Download 按钮导出）包含列：
+      Subject ID, Phase, Sex, Research Group, Visit, Age, Modality, Description
+    但 **没有** Image ID（IMAGEUID）列。
+
+    策略：
+    - 对每个 (PTID, VISCODE) 查看 IDA CSV 里对应的所有 Description
+    - 若存在至少一条非 repeat / 非 SENS 的描述 → 认为 UCSFFSX 里的 IMAGEUID
+      是正常 scan，保留
+    - 若只有 repeat/SENS 描述 → IMAGEUID 对应 repeat scan（FreeSurfer 被迫使用），
+      打印警告并保留（无替代 scan，仍需下载）
+    - 若 (PTID, VISCODE) 在 IDA CSV 里完全找不到 → 无法判断，保留并警告
+    """
+    # IDA Visit 名称 → VISCODE 的映射（近似）
+    VISIT_MAP = {
+        "ADNI Screening":              "bl",
+        "ADNI Baseline":               "bl",
+        "ADNIGO Screening MRI":        "bl",
+        "ADNI2 Screening MRI-New Pt":  "bl",
+        "ADNI2 Initial Visit-Cont Pt": "bl",
+        "ADNI1/GO Month 12":           "m12",
+        "ADNI2 Year 1 Visit":          "m12",
+        "ADNI1/GO Month 24":           "m24",
+        "ADNI2 Year 2 Visit":          "m24",
+        "ADNI1/GO Month 36":           "m36",
+        "ADNI2 Year 3 Visit":          "m36",
+        "ADNI1/GO Month 48":           "m48",
+        "ADNI2 Year 4 Visit":          "m48",
+        "ADNIGO Month 60":             "m60",
+        "ADNI2 Year 5 Visit":          "m60",
+        "ADNI3 Initial Visit-Cont Pt": "bl",
+        "ADNI3 Year 1 Visit":          "m12",
+        "ADNI3 Year 2 Visit":          "m24",
+        "ADNI4 Initial Visit-Cont Pt": "bl",
+    }
+    REPEAT_PAT = r"(?i)(repeat\b|-R;)"
+    SENS_PAT   = r"(?i)\bSENS\b"
+
+    try:
+        ida = pd.read_csv(ida_csv_path)
+    except Exception as e:
+        print(f"  [警告] 无法读取 IDA CSV: {e}，跳过交叉验证")
+        return df
+
+    # 标准化列名
+    ida.columns = [c.strip() for c in ida.columns]
+    if "Subject ID" not in ida.columns or "Visit" not in ida.columns or "Description" not in ida.columns:
+        print(f"  [警告] IDA CSV 缺少必要列（Subject ID / Visit / Description），跳过")
+        return df
+
+    ida = ida[ida["Modality"].astype(str).str.upper() == "MRI"].copy() if "Modality" in ida.columns else ida.copy()
+    ida["VISCODE"] = ida["Visit"].map(VISIT_MAP)
+    ida = ida.dropna(subset=["VISCODE"])
+    ida["is_bad"] = (ida["Description"].str.contains(REPEAT_PAT, regex=True, na=False) |
+                     ida["Description"].str.contains(SENS_PAT,   regex=True, na=False))
+
+    # 对每个 (PTID, VISCODE) 判断：是否存在 good scan
+    good_set = set(
+        ida[~ida["is_bad"]][["Subject ID","VISCODE"]]
+        .itertuples(index=False, name=None)
+    )
+    bad_only_set = set(
+        ida.groupby(["Subject ID","VISCODE"])
+        .filter(lambda g: g["is_bad"].all())[["Subject ID","VISCODE"]]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    )
+
+    if "PTID" not in df.columns:
+        print("  [提示] 下载清单缺少 PTID 列，跳过 IDA CSV 交叉验证")
+        return df
+
+    repeat_ids = []
+    for _, row in df.iterrows():
+        key = (row["PTID"], row["VISCODE"])
+        if key in bad_only_set:
+            repeat_ids.append(int(row["IMAGEUID"]))
+
+    if repeat_ids:
+        print(f"\n[IDA CSV 交叉验证]")
+        print(f"  发现 {len(repeat_ids)} 个 IMAGEUID 在 IDA 里只对应 repeat/SENS 扫描：")
+        print(f"  {repeat_ids[:20]}{'...' if len(repeat_ids) > 20 else ''}")
+        print(f"  这些 scan 是 FreeSurfer 被迫使用 repeat 的情况（原始 scan 不可用）。")
+        print(f"  已保留在下载清单中（无替代），请在分析时酌情排除。")
+        # 在 CSV 里加标记列方便后续筛选
+        df = df.copy()
+        df["IS_REPEAT_ONLY"] = df["IMAGEUID"].isin(repeat_ids).astype(int)
+    else:
+        print(f"\n[IDA CSV 交叉验证] 未发现 repeat-only IMAGEUID，下载清单干净。")
+        df = df.copy()
+        df["IS_REPEAT_ONLY"] = 0
+
+    not_found = df[~df["PTID"].apply(lambda p: any(p == k[0] for k in good_set | bad_only_set))]
+    if len(not_found):
+        print(f"  另有 {len(not_found)} 条记录在 IDA CSV 里找不到对应访视（可能 Visit 名称未映射）")
+
+    return df
     """补充 PTID（若 UCSFFSX 没有，从 REGISTRY 获取）。"""
     if "PTID" in df.columns and df["PTID"].notna().mean() > 0.5:
         return df
@@ -214,7 +350,8 @@ def add_ptid(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     return df
 
 
-def generate_download_list(rda_dir: str, output_path: str) -> None:
+def generate_download_list(rda_dir: str, output_path: str,
+                           ida_csv: str | None = None) -> None:
     rda_dir = os.path.expanduser(rda_dir)
 
     print(f"\n从 {rda_dir} 提取 IMAGEUID ...")
@@ -230,6 +367,12 @@ def generate_download_list(rda_dir: str, output_path: str) -> None:
     target = {"bl","m12","m24","m36","m48","m60"}
     df_target = df[df["VISCODE"].isin(target)].copy()
     print(f"\n目标访视（bl/m12/m24/m36/m48/m60）: {len(df_target)} 条")
+
+    # 用 IDA 搜索 CSV 做交叉验证（可选）
+    if ida_csv:
+        ida_csv = os.path.expanduser(ida_csv)
+        print(f"\n用 IDA CSV 做交叉验证: {ida_csv}")
+        df_target = filter_by_ida_csv(df_target, ida_csv)
 
     # 保存
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -270,5 +413,7 @@ if __name__ == "__main__":
     parser.add_argument("--rda_dir", required=True,
                         help="ADNIMERGE2 的 data/ 目录")
     parser.add_argument("--output",  default="data/mri_download_list.csv")
+    parser.add_argument("--ida_csv", default=None,
+                        help="IDA Advanced Search 导出的 CSV（可选），用于交叉验证 repeat scan")
     args = parser.parse_args()
-    generate_download_list(args.rda_dir, args.output)
+    generate_download_list(args.rda_dir, args.output, ida_csv=args.ida_csv)
