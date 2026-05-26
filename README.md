@@ -66,14 +66,47 @@ python train.py --fold 0
 
 ---
 
-### 第一步：下载 ADNIMERGE.csv（表格数据）
+### 第一步：获取表格数据
 
-登录后：
+#### 方案 A（推荐）：从 ADNIMERGE2 R 包 .rda 文件自动构建
+
+如果你已下载 `ADNIMERGE2.tar.gz` 并解压到本地：
+
+```bash
+# 解压
+tar -xzf ADNIMERGE2.tar.gz
+
+# 从 .rda 文件自动生成 data/ADNIMERGE.csv
+python data/build_adnimerge_from_rda.py \
+    --rda_dir ~/LMDP/ADNIMERGE2/data \
+    --output  data/ADNIMERGE.csv
+
+# 先做列名诊断（可选，确认列名匹配）
+python data/build_adnimerge_from_rda.py \
+    --rda_dir ~/LMDP/ADNIMERGE2/data \
+    --inspect_only
 ```
-Study Data
-  → Key ADNI Tables and Composite Measures
-    → ADNIMERGE
-      → 下载 CSV
+
+依赖：`pip install pyreadr`
+
+合并的文件及其作用：
+
+| 文件 | 用途 |
+|------|------|
+| `DXSUM.rda` | 诊断标签（CN/MCI/Dementia）|
+| `PTDEMOG.rda` | 性别、教育、出生年月 |
+| `APOERES.rda` | APOE4 等位基因数 |
+| `REGISTRY.rda` | 各访视日期（EXAMDATE）|
+| `UCSFFSX51ALL.rda` | FreeSurfer v5.1 脑区体积（ADNI1/GO）|
+| `UCSFFSX.rda` | FreeSurfer 脑区体积（ADNI GO/2）|
+| `UCSFFSX6.rda` | FreeSurfer v6 脑区体积（ADNI3）|
+| `UCSFFSX7.rda` | FreeSurfer v7 脑区体积（所有相位）|
+
+#### 方案 B：直接下载 ADNIMERGE.csv
+
+登录 adni.loni.usc.edu：
+```
+Study Data → Key ADNI Tables and Composite Measures → ADNIMERGE → 下载 CSV
 ```
 
 保存到：`data/ADNIMERGE.csv`

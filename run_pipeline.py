@@ -45,6 +45,8 @@ def check_file(path: str, name: str) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="LMDP-Net 端到端流水线")
+    parser.add_argument("--rda_dir",        default="",
+                        help="ADNIMERGE2 data/ 目录（有 .rda 文件时自动构建 ADNIMERGE.csv）")
     parser.add_argument("--skip_preprocess", action="store_true",
                         help="跳过预处理步骤（数据已准备好）")
     parser.add_argument("--skip_imaging",    action="store_true",
@@ -64,12 +66,22 @@ def main():
     print("  LMDP-Net 复现流水线")
     print("=" * 60)
 
-    # ── 步骤 0：检查必要文件 ─────────────────────────────────────────────────
-    if not args.skip_preprocess:
-        if not check_file(Config.ADNIMERGE_PATH, "ADNIMERGE.csv"):
-            print("\n请先下载 ADNIMERGE.csv：")
-            print("  adni.loni.usc.edu → Study Data → ADNIMERGE")
-            print(f"  保存到: {Config.ADNIMERGE_PATH}")
+    # ── 步骤 0：从 .rda 文件构建 ADNIMERGE.csv（若尚未存在）──────────────────
+    if not args.skip_preprocess and not os.path.exists(Config.ADNIMERGE_PATH):
+        rda_dir = args.rda_dir or os.path.expanduser("~/LMDP/ADNIMERGE2/data")
+        if os.path.isdir(rda_dir) and any(
+                f.endswith(".rda") for f in os.listdir(rda_dir)):
+            ret = run(
+                f"python {os.path.join('data', 'build_adnimerge_from_rda.py')} "
+                f"--rda_dir \"{rda_dir}\" --output {Config.ADNIMERGE_PATH}",
+                "步骤 0/3：从 .rda 文件构建 ADNIMERGE.csv"
+            )
+            if ret != 0:
+                sys.exit(1)
+        else:
+            print(f"\n[错误] 找不到 {Config.ADNIMERGE_PATH}，也找不到 .rda 目录")
+            print("  方案 A：提供 --rda_dir ~/LMDP/ADNIMERGE2/data")
+            print("  方案 B：手动下载 ADNIMERGE.csv 到 data/ADNIMERGE.csv")
             sys.exit(1)
 
     # ── 步骤 1：表格数据预处理 ───────────────────────────────────────────────
