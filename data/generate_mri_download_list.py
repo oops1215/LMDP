@@ -120,11 +120,27 @@ def extract_imageids_from_fs(rda_dir: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     combined = pd.concat(frames, ignore_index=True)
+
     # 同一 RID+VISCODE 可能有多条（ADNI 对同一访视处理了多个扫描）
-    # 保留最小 IMAGEUID（编号最小 = 最早采集，通常是 primary scan 而非 repeat）
+    # 按描述优先级排序：standard Scaled > Scaled_2 > 未知 > SENS > repeat
+    # 这样 drop_duplicates(keep="first") 保留的永远是最接近 primary scan 的那条
+    def _scan_priority(desc: str) -> int:
+        d = str(desc).lower()
+        if "repeat" in d or "-r;" in d:
+            return 10   # repeat — 最不优先
+        if "sens" in d:
+            return 8    # sensitivity variant
+        if "scaled_2" in d or "scaled 2" in d:
+            return 1    # secondary scaling pass，次优
+        if "scaled" in d:
+            return 0    # standard Scaled — 最优先
+        return 5        # 其他未知序列
+
+    combined["_priority"] = combined["PREFERRED_DESC"].apply(_scan_priority)
     combined = (combined
-                .sort_values("IMAGEUID")
-                .drop_duplicates(subset=["RID","VISCODE"], keep="first"))
+                .sort_values(["RID", "VISCODE", "_priority", "IMAGEUID"])
+                .drop_duplicates(subset=["RID", "VISCODE"], keep="first")
+                .drop(columns=["_priority"]))
     combined = combined.sort_values(["RID","VISCODE"]).reset_index(drop=True)
     print(f"\n汇总: {len(combined)} 条记录，{combined['RID'].nunique()} 名受试者")
     return combined
