@@ -82,7 +82,10 @@ def preprocess_tabular(adnimerge_path: str = Config.ADNIMERGE_PATH,
     # 某些行 DX 为空，但 DX_bl 不为空（基线诊断），用基线诊断填充
     if "DX_bl" in df.columns:
         mask_missing = df["DX_int"] == -1
-        df.loc[mask_missing, "DX_int"] = df.loc[mask_missing, "DX_bl"].apply(encode_dx)
+        filled = df.loc[mask_missing, "DX_bl"].apply(encode_dx)
+        df["DX_int"] = df["DX_int"].astype(object)   # 避免 FutureWarning
+        df.loc[mask_missing, "DX_int"] = filled
+        df["DX_int"] = df["DX_int"].astype(int)
 
     # ── 3. 去除 DX 完全未知的受试者 ─────────────────────────────────────────
     df = df[df["DX_int"] >= 0].copy()
@@ -130,13 +133,31 @@ def preprocess_tabular(adnimerge_path: str = Config.ADNIMERGE_PATH,
     edu_arr = df["PTEDUCAT"].values.astype(np.float32).reshape(-1, 1) \
         if "PTEDUCAT" in df.columns else np.zeros((len(df), 1), dtype=np.float32)
 
+    # 诊断：各生物标志物的非空率
+    print("\n  生物标志物覆盖率:")
+    for i, col in enumerate(biomarker_icv_cols):
+        valid = (~np.isnan(bio_arr[:, i])).sum()
+        print(f"    {col:25s}: {valid}/{len(bio_arr)} ({100*valid/len(bio_arr):.1f}%)")
+
     # 全局 scaler（仅用于 sanity check，训练时重新在 fold 上 fit）
     bio_scaler = StandardScaler()
-    bio_scaler.fit(bio_arr[~np.isnan(bio_arr).any(axis=1)])
+    all_valid = ~np.isnan(bio_arr).any(axis=1)
+    if all_valid.sum() == 0:
+        # 没有全6维都有的行 → 逐列用均值填充 NaN 后拟合（仅用于 scaler 初始化）
+        print("  [警告] 没有行同时具备全部6个生物标志物，使用列均值填充后拟合 scaler")
+        col_means = np.nanmean(bio_arr, axis=0)
+        col_means = np.where(np.isnan(col_means), 0.0, col_means)
+        bio_arr_filled = np.where(np.isnan(bio_arr), col_means[None, :], bio_arr)
+        bio_scaler.fit(bio_arr_filled)
+    else:
+        bio_scaler.fit(bio_arr[all_valid])
+
     age_scaler = StandardScaler()
-    age_scaler.fit(age_arr[~np.isnan(age_arr).any(axis=0)])
+    age_valid = ~np.isnan(age_arr).any(axis=1)
+    age_scaler.fit(age_arr[age_valid] if age_valid.any() else np.zeros((1, 1)))
     edu_scaler = StandardScaler()
-    edu_scaler.fit(edu_arr[~np.isnan(edu_arr).any(axis=0)])
+    edu_valid = ~np.isnan(edu_arr).any(axis=1)
+    edu_scaler.fit(edu_arr[edu_valid] if edu_valid.any() else np.zeros((1, 1)))
 
     # ── 8. 性别 one-hot ──────────────────────────────────────────────────────
     def gender_oh(g):
