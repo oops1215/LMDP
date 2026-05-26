@@ -318,6 +318,18 @@ def load_apoeres(rda_dir: str) -> pd.DataFrame:
         out = normalize_rid(df[["RID", "APOE4"]].drop_duplicates(subset=["RID"], keep="first"))
         return out
 
+    # GENOTYPE 列（格式如 "3/4"、"4/4"、"2/3"）→ 计算 ε4 等位基因数
+    genotype_col = find_col(df, ["GENOTYPE", "APOE_GENOTYPE", "APOETYPE"], "GENOTYPE")
+    if genotype_col:
+        def count_e4(gt):
+            if not isinstance(gt, str):
+                return np.nan
+            alleles = gt.strip().replace(" ", "").split("/")
+            return sum(1 for a in alleles if a == "4")
+        df["APOE4"] = df[genotype_col].apply(count_e4)
+        out = normalize_rid(df[["RID", "APOE4"]].drop_duplicates(subset=["RID"], keep="first"))
+        return out
+
     # 从两个等位基因列计算（APGEN1/APGEN2 = allele codes, 4 = ε4）
     g1 = find_col(df, ["APGEN1", "ALLELE1", "APOE_ALLELE1", "GENE1"], "APGEN1")
     g2 = find_col(df, ["APGEN2", "ALLELE2", "APOE_ALLELE2", "GENE2"], "APGEN2")
@@ -418,9 +430,13 @@ def compute_age(demo_df: pd.DataFrame,
     if "PTDOB_YEAR" not in demo_df.columns or "EXAMDATE" not in dxsum_df.columns:
         return dxsum_df
 
-    dob = demo_df[["RID", "PTDOB_YEAR", "PTDOB_MONTH"]].copy()
-    dob["PTDOB_MONTH"] = pd.to_numeric(dob.get("PTDOB_MONTH", 1),
-                                         errors="coerce").fillna(7).astype(int)
+    keep_cols = ["RID", "PTDOB_YEAR"] + \
+                (["PTDOB_MONTH"] if "PTDOB_MONTH" in demo_df.columns else [])
+    dob = demo_df[keep_cols].copy()
+    if "PTDOB_MONTH" not in dob.columns:
+        dob["PTDOB_MONTH"] = 7   # 月份未知时取年中（7月）估算
+    dob["PTDOB_MONTH"] = pd.to_numeric(dob["PTDOB_MONTH"],
+                                        errors="coerce").fillna(7).astype(int)
     dob["PTDOB_YEAR"] = pd.to_numeric(dob["PTDOB_YEAR"], errors="coerce")
     dob["DOB_DATE"] = pd.to_datetime(
         dob["PTDOB_YEAR"].astype(str) + "-" + dob["PTDOB_MONTH"].astype(str) + "-15",
