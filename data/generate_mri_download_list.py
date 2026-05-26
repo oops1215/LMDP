@@ -126,7 +126,7 @@ def extract_imageids_from_fs(rda_dir: str) -> pd.DataFrame:
     # 这样 drop_duplicates(keep="first") 保留的永远是最接近 primary scan 的那条
     def _scan_priority(desc: str) -> int:
         d = str(desc).lower()
-        if "repeat" in d or "-r;" in d:
+        if "repeat" in d or "mpr-r" in d:
             return 10   # repeat — 最不优先
         if "sens" in d:
             return 8    # sensitivity variant
@@ -206,7 +206,7 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     # 衍生产品    → HarP / Reoriented / Brain Mask / MUSE（非原始结构像）
     # 注意：不用 _2\b，因为 "Scaled_2" 是 ADNI1 正常扫描的描述后缀，不应排除
     EXCLUDE = (
-        r"(?i)(repeat\b|-R;|\bSENS\b"
+        r"(?i)(repeat\b|MPR-R|\bSENS\b"
         r"|fmri|dti|dwi|bold|pcasl|asl\b|flair|swi|t2\b"
         r"|\bharp\b|reoriented|brain[\s_]?mask|\bmuse\b)"
     )
@@ -241,7 +241,7 @@ def _fallback_repeat_filter(df: pd.DataFrame) -> pd.DataFrame:
     """
     if "PREFERRED_DESC" not in df.columns:
         return df
-    EXCLUDE = r"(?i)(repeat\b|-R;|\bSENS\b|\bharp\b|reoriented|brain[\s_]?mask|\bmuse\b)"
+    EXCLUDE = r"(?i)(repeat\b|MPR-R|\bSENS\b|\bharp\b|reoriented|brain[\s_]?mask|\bmuse\b)"
     is_unwanted = df["PREFERRED_DESC"].str.contains(EXCLUDE, regex=True, na=False)
     n_bad = is_unwanted.sum()
     if n_bad:
