@@ -62,19 +62,21 @@ def standardize_viscode(vc):
 
 def extract_imageids_from_fs(rda_dir: str) -> pd.DataFrame:
     """
-    从所有 UCSFFSX*.rda 文件提取 RID, VISCODE, IMAGEUID（及可选的 EXAMDATE、FLDSTRENG）。
-    这些 IMAGEUID 就是 ADNI IDA 中的 Image Data ID。
+    从所有 UCSFFSX*.rda 文件提取 RID, VISCODE, IMAGEUID。
+    每个 IMAGEUID 唯一对应 ADNI IDA 中的一张图像（FreeSurfer 处理时使用的那张）。
+    在 IDA 中只需按 Image ID 搜索，不要加 Description 过滤——每个 ID 已唯一。
     """
+    # 各来源文件对应的 ADNI 期别和典型图像描述（仅供参考，IDA 搜索不需要用）
     fs_files = [
-        "UCSFFSX.rda",
-        "UCSFFSX51.rda",        # ADNI1/GO/2 (실제 파일명)
-        "UCSFFSX51ALL.rda",     # 일부 배포판의 대체 파일명
-        "UCSFFSX51_ADNI1_3T.rda",
-        "UCSFFSX6.rda",
-        "UCSFFSX7.rda",
+        ("UCSFFSX.rda",           "MPR; GradWarp; B1 Correction; N3; Scaled"),      # ADNI1 1.5T
+        ("UCSFFSX51.rda",         "MPR; GradWarp; B1 Correction; N3; Scaled"),      # ADNI1/GO/2
+        ("UCSFFSX51ALL.rda",      "MPR; GradWarp; B1 Correction; N3; Scaled"),      # 部分版本别名
+        ("UCSFFSX51_ADNI1_3T.rda","MPR; GradWarp; B1 Correction; N3; Scaled"),      # ADNI1 3T
+        ("UCSFFSX6.rda",          "ADNI Brain T1 3T"),                              # ADNI3
+        ("UCSFFSX7.rda",          "ADNI Brain T1 3T"),                              # ADNI4
     ]
     frames = []
-    for fname in fs_files:
+    for fname, preferred_desc in fs_files:
         df = read_rda_safe(rda_dir, fname)
         if df is None:
             continue
@@ -91,11 +93,11 @@ def extract_imageids_from_fs(rda_dir: str) -> pd.DataFrame:
         sub["IMAGEUID"] = pd.to_numeric(df["IMAGEUID"], errors="coerce").astype("Int64")
 
         if "EXAMDATE" in df.columns:
-            sub["EXAMDATE"]  = pd.to_datetime(df["EXAMDATE"], errors="coerce").dt.strftime("%Y-%m-%d")
-        if "FLDSTRENG" in df.columns:
-            sub["FLDSTRENG"] = df["FLDSTRENG"]   # 磁场强度（1.5 / 3T）
+            sub["EXAMDATE"] = pd.to_datetime(df["EXAMDATE"], errors="coerce").dt.strftime("%Y-%m-%d")
         if "PTID" in df.columns:
             sub["PTID"] = df["PTID"]
+        sub["PREFERRED_DESC"] = preferred_desc  # 该来源文件的典型图像描述
+        sub["SOURCE"] = fname
 
         # QC 过滤
         qc = next((c for c in ["OVERALLQC","LHIPQC","HIPPOQC"] if c in df.columns), None)
@@ -103,9 +105,15 @@ def extract_imageids_from_fs(rda_dir: str) -> pd.DataFrame:
             sub = sub[df[qc].astype(str).str.strip().str.upper().isin(
                 ["PASS","1","1.0","TRUE"])]
 
-        sub["SOURCE"] = fname
+        # 过滤无效 IMAGEUID
+        sub = sub[sub["IMAGEUID"].notna() & (sub["IMAGEUID"] > 0)]
+
+        if len(sub) == 0:
+            print(f"  {fname}: 无有效 IMAGEUID（该文件可能不含图像元数据）")
+            continue
+
         frames.append(sub)
-        print(f"  {fname}: {len(sub)} 条有效 IMAGEUID")
+        print(f"  {fname}: {len(sub)} 条有效 IMAGEUID  [{preferred_desc[:40]}...]")
 
     if not frames:
         print("[警告] 未从任何 UCSFFSX 文件中提取到 IMAGEUID")
@@ -164,9 +172,8 @@ def generate_download_list(rda_dir: str, output_path: str) -> None:
     # 统计
     print(f"\n各访视 IMAGEUID 数量:")
     print(df_target["VISCODE"].value_counts().sort_index().to_string())
-    if "FLDSTRENG" in df_target.columns:
-        print(f"\n磁场强度分布:")
-        print(df_target["FLDSTRENG"].value_counts().to_string())
+    print(f"\n各来源文件分布:")
+    print(df_target["SOURCE"].value_counts().to_string())
 
     # 生成 ADNI IDA 搜索用的 Image ID 列表（两种格式）
     id_list = df_target["IMAGEUID"].dropna().astype(int).tolist()
@@ -176,9 +183,19 @@ def generate_download_list(rda_dir: str, output_path: str) -> None:
     id_file_csv = output_path.replace(".csv", "_ids_comma.txt")
     with open(id_file_csv, "w") as f:
         f.write(",".join(str(i) for i in id_list))
-    print(f"\n纯 ID 列表（每行一个，ADNI IDA 文件上传）: {id_file}")
-    print(f"逗号分隔 ID（粘贴到 ADNI IDA 搜索框）: {id_file_csv}")
+    print(f"\n纯 ID 列表（每行一个）: {id_file}")
+    print(f"逗号分隔 ID（粘贴用）  : {id_file_csv}")
     print(f"共 {len(id_list)} 个 Image ID")
+    print("""
+=== ADNI IDA 下载说明 ===
+1. 登录 ida.loni.usc.edu
+2. Download → Image Collections → Advanced Image Search (beta)
+3. 左侧 "Image ID" 栏粘贴 _ids_comma.txt 的内容
+   ⚠️  不要加任何 Image Description / Modality 过滤
+      每个 Image ID 唯一对应一张图，加过滤只会减少结果
+4. 全选 → Add to Collection → 下载 NIfTI
+   预期返回图像数 ≈ ID 总数（部分因权限不足可能缺失）
+""")
 
 
 if __name__ == "__main__":
