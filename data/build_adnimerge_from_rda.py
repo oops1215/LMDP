@@ -106,6 +106,14 @@ def find_col(df: pd.DataFrame, candidates: list, label: str) -> Optional[str]:
     return None
 
 
+def normalize_rid(df: pd.DataFrame) -> pd.DataFrame:
+    """将 RID 列统一转换为 Int64（可空整数），避免 float64 vs object 的 merge 报错。"""
+    if "RID" in df.columns:
+        df = df.copy()
+        df["RID"] = pd.to_numeric(df["RID"], errors="coerce").astype("Int64")
+    return df
+
+
 def try_get_bilateral(df: pd.DataFrame,
                        struct: str,
                        spec: dict) -> Optional[pd.Series]:
@@ -174,18 +182,41 @@ def load_dxsum(rda_dir: str) -> pd.DataFrame:
         7: "CN",  8: "MCI",  9: "CN",
     }
 
+    # 直接字符串诊断列（部分 ADNIMERGE2 版本已有处理好的列）
+    dx_str_map = {
+        "nl": "CN", "cn": "CN", "normal": "CN",
+        "mci": "MCI", "emci": "MCI", "lmci": "MCI",
+        "ad": "Dementia", "dem": "Dementia", "dementia": "Dementia",
+    }
+
+    def _to_int(val):
+        """安全地将 val 转为 int，处理 1.0 / '1' / '1.0' 等各种形式。"""
+        try:
+            return int(float(val))
+        except (ValueError, TypeError):
+            return None
+
     def parse_dx(row):
-        # ADNI1 使用 DXCURREN；ADNI-GO/2/3 使用 DXCHANGE
-        if "DXCHANGE" in df.columns and not pd.isna(row.get("DXCHANGE")):
-            try:
-                return dx_map_change.get(int(row["DXCHANGE"]), "")
-            except (ValueError, TypeError):
-                pass
-        if "DXCURREN" in df.columns and not pd.isna(row.get("DXCURREN")):
-            try:
-                return dx_map_curren.get(int(row["DXCURREN"]), "")
-            except (ValueError, TypeError):
-                pass
+        # 优先：直接字符串诊断列（ADNI3/ADNIMERGE2 新版）
+        for col in ["DIAGNOSIS", "DXMDES", "DX"]:
+            if col in df.columns:
+                val = str(row.get(col, "")).strip().lower()
+                if val in dx_str_map:
+                    return dx_str_map[val]
+        # ADNI-GO/2/3：DXCHANGE（数值编码）
+        if "DXCHANGE" in df.columns:
+            v = _to_int(row.get("DXCHANGE"))
+            if v is not None:
+                r = dx_map_change.get(v, "")
+                if r:
+                    return r
+        # ADNI1：DXCURREN
+        if "DXCURREN" in df.columns:
+            v = _to_int(row.get("DXCURREN"))
+            if v is not None:
+                r = dx_map_curren.get(v, "")
+                if r:
+                    return r
         return ""
 
     df["DX"] = df.apply(parse_dx, axis=1)
@@ -201,6 +232,18 @@ def load_dxsum(rda_dir: str) -> pd.DataFrame:
     out = out.rename(columns={"VISCODE_STD": "VISCODE"})
     # 去重（同一 RID + VISCODE 保留第一条）
     out = out.sort_values("RID").drop_duplicates(subset=["RID", "VISCODE"], keep="first")
+    out = normalize_rid(out)
+
+    if len(out) == 0:
+        # 打印实际列名帮助调试
+        dx_cols = [c for c in df.columns if any(
+            k in c for k in ["DX", "DIAG", "CURREN", "CHANGE"])]
+        print(f"  [诊断] 检测到的相关列: {dx_cols}")
+        sample_vals = {}
+        for c in dx_cols[:3]:
+            sample_vals[c] = df[c].dropna().unique()[:5].tolist()
+        print(f"  [诊断] 样例值: {sample_vals}")
+
     print(f"  → 有效诊断记录: {len(out)} 条，受试者: {out['RID'].nunique()} 人")
     return out
 
@@ -220,6 +263,7 @@ def load_registry(rda_dir: str) -> pd.DataFrame:
     out = df[["RID", "VISCODE_STD", "EXAMDATE_REG"]].copy()
     out = out.rename(columns={"VISCODE_STD": "VISCODE"})
     out = out.drop_duplicates(subset=["RID", "VISCODE"], keep="first")
+    out = normalize_rid(out)
     return out
 
 
@@ -256,6 +300,7 @@ def load_ptdemog(rda_dir: str) -> pd.DataFrame:
     out = df[cols].copy().rename(columns=rename)
     # PTDEMOG 是一次性的（每人一条基线记录），去重
     out = out.drop_duplicates(subset=["RID"], keep="first")
+    out = normalize_rid(out)
     return out
 
 
@@ -266,15 +311,25 @@ def load_apoeres(rda_dir: str) -> pd.DataFrame:
     if df is None:
         return pd.DataFrame(columns=["RID", "APOE4"])
 
-    g1 = find_col(df, ["APGEN1"], "APGEN1")
-    g2 = find_col(df, ["APGEN2"], "APGEN2")
+    # 先检查是否已有直接的 APOE4 计数列
+    apoe4_direct = find_col(df, ["APOE4", "APOE4NUM", "APOE_E4"], "APOE4")
+    if apoe4_direct:
+        df["APOE4"] = pd.to_numeric(df[apoe4_direct], errors="coerce")
+        out = normalize_rid(df[["RID", "APOE4"]].drop_duplicates(subset=["RID"], keep="first"))
+        return out
+
+    # 从两个等位基因列计算（APGEN1/APGEN2 = allele codes, 4 = ε4）
+    g1 = find_col(df, ["APGEN1", "ALLELE1", "APOE_ALLELE1", "GENE1"], "APGEN1")
+    g2 = find_col(df, ["APGEN2", "ALLELE2", "APOE_ALLELE2", "GENE2"], "APGEN2")
     if g1 is None or g2 is None:
-        print("  [警告] APOERES 中未找到 APGEN1/APGEN2，APOE4 将缺失")
-        return pd.DataFrame(columns=["RID", "APOE4"])
+        print("  [警告] APOERES 中未找到等位基因列，APOE4 将缺失")
+        print(f"         实际列名: {list(df.columns)}")
+        empty = pd.DataFrame({"RID": pd.array([], dtype="Int64"), "APOE4": []})
+        return empty
 
     df["APOE4"] = (pd.to_numeric(df[g1], errors="coerce").eq(4).astype(int) +
                    pd.to_numeric(df[g2], errors="coerce").eq(4).astype(int))
-    out = df[["RID", "APOE4"]].drop_duplicates(subset=["RID"], keep="first")
+    out = normalize_rid(df[["RID", "APOE4"]].drop_duplicates(subset=["RID"], keep="first"))
     return out
 
 
@@ -312,6 +367,7 @@ def load_freesurfer_single(rda_dir: str, filename: str) -> Optional[pd.DataFrame
         out[var] = series if series is not None else np.nan
 
     out = out.drop_duplicates(subset=["RID", "VISCODE"], keep="first")
+    out = normalize_rid(out)
     n_valid = out[["Hippocampus", "Ventricles", "ICV"]].notna().all(axis=1).sum()
     print(f"    {filename}: {len(out)} 行，含三项指标 {n_valid} 条")
     return out
