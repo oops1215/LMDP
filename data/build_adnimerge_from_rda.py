@@ -285,14 +285,36 @@ def load_ptdemog(rda_dir: str) -> pd.DataFrame:
     edu_col = find_col(df, ["PTEDUCAT"], "PTEDUCAT")
 
     # 出生年月（用于计算年龄）
-    dob_year_col  = find_col(df, ["PTDOBYY", "DOBYR", "BIRTHYEAR", "PTYEAR"], "DOB_YEAR")
-    dob_month_col = find_col(df, ["PTDOBMM", "DOBMM", "BIRTHMONTH", "PTMONTH"], "DOB_MONTH")
+    dob_year_col  = find_col(df, [
+        "PTDOBYY", "BIRTHYR", "BIRTHYEAR", "DOBYR", "PTYEAR",
+        "YOB", "YEAR_OF_BIRTH", "BIRTH_YEAR", "PTBIRTHYEAR",
+    ], "DOB_YEAR")
+    dob_month_col = find_col(df, [
+        "PTDOBMM", "BIRTHMO", "BIRTHMONTH", "DOBMM", "PTMONTH",
+        "MOB", "MONTH_OF_BIRTH", "BIRTH_MONTH",
+    ], "DOB_MONTH")
+
+    # 直接年龄列（基线年龄，部分版本直接提供）
+    age_direct_col = find_col(df, ["AGE", "PTAGE", "AGECONS", "AGE_CONSENT",
+                                   "PTAGEYRS", "AGEYRBL"], "AGE")
+
+    if dob_year_col is None and age_direct_col is None:
+        # 打印所有列名帮助调试
+        print(f"  [警告] PTDEMOG 中未找到出生年份或年龄列，AGE 将缺失")
+        age_related = [c for c in df.columns
+                       if any(k in c for k in ["DOB", "BIRTH", "AGE", "YR", "YEAR"])]
+        print(f"         相关列候选: {age_related[:20]}")
 
     cols = ["RID"]
     rename = {}
-    for c, name in [(ptid_col, "PTID"), (gender_col, "PTGENDER"),
-                    (edu_col, "PTEDUCAT"), (dob_year_col, "PTDOB_YEAR"),
-                    (dob_month_col, "PTDOB_MONTH")]:
+    for c, name in [
+        (ptid_col,      "PTID"),
+        (gender_col,    "PTGENDER"),
+        (edu_col,       "PTEDUCAT"),
+        (dob_year_col,  "PTDOB_YEAR"),
+        (dob_month_col, "PTDOB_MONTH"),
+        (age_direct_col,"AGE_DIRECT"),   # 直接年龄（基线）
+    ]:
         if c:
             cols.append(c)
             rename[c] = name
@@ -425,28 +447,39 @@ def load_all_freesurfer(rda_dir: str) -> pd.DataFrame:
 def compute_age(demo_df: pd.DataFrame,
                 dxsum_df: pd.DataFrame) -> pd.DataFrame:
     """
-    利用 PTDEMOG 的出生年月和 DXSUM 的 EXAMDATE 计算各访视的年龄。
+    利用 PTDEMOG 的出生年月（或直接年龄列）和 DXSUM 的 EXAMDATE 计算各访视的年龄。
+    优先级：出生年份+EXAMDATE > 直接年龄列（仅基线准确，其他访视按时间偏移估算）
     """
-    if "PTDOB_YEAR" not in demo_df.columns or "EXAMDATE" not in dxsum_df.columns:
-        return dxsum_df
+    # 方案 A：用出生年月 + EXAMDATE 精确计算每次访视的年龄
+    if "PTDOB_YEAR" in demo_df.columns and "EXAMDATE" in dxsum_df.columns:
+        keep_cols = ["RID", "PTDOB_YEAR"] + \
+                    (["PTDOB_MONTH"] if "PTDOB_MONTH" in demo_df.columns else [])
+        dob = demo_df[keep_cols].copy()
+        if "PTDOB_MONTH" not in dob.columns:
+            dob["PTDOB_MONTH"] = 7
+        dob["PTDOB_MONTH"] = pd.to_numeric(dob["PTDOB_MONTH"],
+                                            errors="coerce").fillna(7).astype(int)
+        dob["PTDOB_YEAR"] = pd.to_numeric(dob["PTDOB_YEAR"], errors="coerce")
+        dob["DOB_DATE"] = pd.to_datetime(
+            dob["PTDOB_YEAR"].astype(str) + "-" + dob["PTDOB_MONTH"].astype(str) + "-15",
+            errors="coerce",
+        )
+        merged = dxsum_df.merge(dob[["RID", "DOB_DATE"]], on="RID", how="left")
+        merged["AGE"] = (pd.to_datetime(merged["EXAMDATE"], errors="coerce") -
+                         merged["DOB_DATE"]).dt.days / 365.25
+        merged = merged.drop(columns=["DOB_DATE"])
+        return merged
 
-    keep_cols = ["RID", "PTDOB_YEAR"] + \
-                (["PTDOB_MONTH"] if "PTDOB_MONTH" in demo_df.columns else [])
-    dob = demo_df[keep_cols].copy()
-    if "PTDOB_MONTH" not in dob.columns:
-        dob["PTDOB_MONTH"] = 7   # 月份未知时取年中（7月）估算
-    dob["PTDOB_MONTH"] = pd.to_numeric(dob["PTDOB_MONTH"],
-                                        errors="coerce").fillna(7).astype(int)
-    dob["PTDOB_YEAR"] = pd.to_numeric(dob["PTDOB_YEAR"], errors="coerce")
-    dob["DOB_DATE"] = pd.to_datetime(
-        dob["PTDOB_YEAR"].astype(str) + "-" + dob["PTDOB_MONTH"].astype(str) + "-15",
-        errors="coerce",
-    )
+    # 方案 B：直接年龄列（仅为基线年龄，非精确）
+    if "AGE_DIRECT" in demo_df.columns:
+        age_map = demo_df.set_index("RID")["AGE_DIRECT"]
+        result = dxsum_df.copy()
+        result["AGE"] = result["RID"].map(age_map)
+        result["AGE"] = pd.to_numeric(result["AGE"], errors="coerce")
+        print("  [年龄] 使用直接年龄列（基线值，其他访视未按时间偏移）")
+        return result
 
-    merged = dxsum_df.merge(dob[["RID", "DOB_DATE"]], on="RID", how="left")
-    merged["AGE"] = (merged["EXAMDATE"] - merged["DOB_DATE"]).dt.days / 365.25
-    merged = merged.drop(columns=["DOB_DATE"])
-    return merged
+    return dxsum_df
 
 
 # ─── 步骤7：列名诊断模式 ────────────────────────────────────────────────────
@@ -455,7 +488,8 @@ def inspect_columns(rda_dir: str) -> None:
     """打印各 .rda 文件中与论文相关的列，帮助调试列名不匹配问题。"""
     inspect_targets = {
         "DXSUM.rda":       ["DXCHANGE", "DXCURREN", "VISCODE", "VISCODE2", "EXAMDATE", "RID"],
-        "PTDEMOG.rda":     ["PTGENDER", "PTEDUCAT", "PTDOBYY", "PTDOBMM", "PTID", "RID"],
+        "PTDEMOG.rda":     ["PTGENDER", "PTEDUCAT", "PTDOBYY", "PTDOBMM", "PTID", "RID",
+                             "AGE", "PTAGE", "AGECONS", "BIRTHYR", "BIRTHYEAR"],
         "APOERES.rda":     ["APGEN1", "APGEN2", "RID"],
         "REGISTRY.rda":    ["EXAMDATE", "VISCODE", "VISCODE2", "RID"],
         "UCSFFSX51ALL.rda":["ST10CV", "ST29SV", "ST88SV", "ST37SV", "ST96SV",
