@@ -134,15 +134,64 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     """
     用图像级元数据为每个 IMAGEUID 补充序列描述，过滤掉 Repeat 扫描和非目标序列。
 
-    优先读取包含 IMAGEUID + DESCRIPTION 的图像列表文件（MRILIST.rda / MRI3LIST.rda）；
-    若不存在则尝试 MRIMETA.rda / MRI3META.rda（协议参数表，通常无 IMAGEUID，会触发回退）。
+    元数据来源（按优先顺序）：
+      1. idaSearch*.csv  — ADNI IDA Advanced Search 导出文件（含 Image ID + Description）
+      2. MRILIST.rda / MRI3LIST.rda — ADNI 图像列表（若有）
+      3. MRIMETA.rda / MRI3META.rda — 协议参数表（通常无 IMAGEUID，会触发回退）
 
     ADNI 命名规则：
-      - 正常：MPR; GradWarp; B1 Correction; N3; Scaled 或 Scaled_2（均为正常 ADNI1 扫描）
-      - Repeat：MPR-R; GradWarp... / MPRAGE REPEAT / MPRAGE_ASO_repeat 等（含 repeat/MPR-R）
+      - 正常：MPR; GradWarp; B1 Correction; N3; Scaled 或 Scaled_2
+      - Repeat：MPR-R; ... / MPRAGE REPEAT / MPRAGE_ASO_repeat（均含 MPR-R 或 repeat）
       - Sensitivity：含 SENS 关键词
     """
-    # 按优先顺序依次尝试：图像列表文件（有 IMAGEUID）> 协议参数文件（通常无 IMAGEUID）
+    desc_map = _build_desc_map(rda_dir)
+    if not desc_map:
+        print("  [提示] 未获取到图像描述，改用关键字回退过滤")
+        print("         建议将 ADNI IDA 导出的 idaSearch*.csv 放入 rda_dir 后重试")
+        return _fallback_repeat_filter(df)
+
+    df = df.copy()
+    df["SEQUENCE"] = df["IMAGEUID"].map(desc_map).fillna("")
+    n_matched = (df["SEQUENCE"] != "").sum()
+    print(f"  SEQUENCE 匹配率: {n_matched}/{len(df)} ({100*n_matched/len(df):.1f}%)")
+
+    return _apply_sequence_filters(df)
+
+
+def _build_desc_map(rda_dir: str) -> dict:
+    """
+    构建 IMAGEUID → 序列描述 字典。
+    优先 idaSearch*.csv，其次 rda 图像列表文件。
+    """
+    import glob
+
+    # ── 优先：IDA 搜索导出 CSV（idaSearch*.csv）───────────────────────────
+    ida_csvs = sorted(glob.glob(os.path.join(rda_dir, "idaSearch*.csv")))
+    if ida_csvs:
+        frames = []
+        for path in ida_csvs:
+            try:
+                df = pd.read_csv(path)
+                # 列名统一：大写 + 空格→下划线，"Image ID" → "IMAGE_ID"
+                df.columns = [c.upper().replace(" ", "_") for c in df.columns]
+                frames.append(df)
+                print(f"  读取 {os.path.basename(path)}: {len(df)} 行")
+            except Exception as e:
+                print(f"  [警告] 读取 {path} 失败: {e}")
+        if frames:
+            meta = pd.concat(frames, ignore_index=True)
+            id_col   = next((c for c in ["IMAGE_ID", "IMAGEUID", "IMAGEID"] if c in meta.columns), None)
+            desc_col = next((c for c in ["DESCRIPTION", "SEQUENCE"] if c in meta.columns), None)
+            if id_col and desc_col:
+                meta["_ID"] = pd.to_numeric(meta[id_col], errors="coerce").astype("Int64")
+                desc_map = (meta.dropna(subset=["_ID"])
+                            .set_index("_ID")[desc_col]
+                            .to_dict())
+                print(f"  IDA CSV: {len(desc_map)} 条 IMAGE_ID → Description 映射")
+                return desc_map
+            print(f"  [警告] IDA CSV 缺少 Image ID 或 Description 列: {list(meta.columns[:10])}")
+
+    # ── 备选：rda 图像列表文件 ─────────────────────────────────────────────
     frames = []
     for fname in ["MRILIST.rda", "MRI3LIST.rda", "MRIMETA.rda", "MRI3META.rda"]:
         path = os.path.join(rda_dir, fname)
@@ -159,41 +208,31 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
             print(f"  [警告] 读取 {fname} 失败: {e}")
 
     if not frames:
-        print("  [提示] 未找到任何图像元数据文件，改用关键字回退过滤")
-        print("         建议从 ADNI LONI 下载 MRILIST.csv 并转换为 MRILIST.rda")
-        return _fallback_repeat_filter(df)
+        return {}
 
     meta = pd.concat(frames, ignore_index=True)
-
-    # 找 Image ID 列（MRILIST 用 IMAGE_ID；MRIMETA 可能用 IMAGEUID）
-    id_col = next((c for c in ["IMAGE_ID", "IMAGEUID", "IMAGEID", "IMAGE_DATA_ID"]
-                   if c in meta.columns), None)
-    # 找描述列（MRILIST 用 DESCRIPTION；MRIMETA 用 SEQUENCE / MRITYPE 等）
+    id_col   = next((c for c in ["IMAGE_ID", "IMAGEUID", "IMAGEID", "IMAGE_DATA_ID"]
+                     if c in meta.columns), None)
     desc_col = next((c for c in ["DESCRIPTION", "SEQUENCE", "MRITYPE", "SERIESTYPE",
                                   "IMAGEDESC", "SERIES_DESCRIPTION"] if c in meta.columns), None)
     if id_col is None or desc_col is None:
-        print(f"  [警告] 元数据文件缺少 Image ID 或描述列，改用关键字回退过滤")
-        print(f"         实际列名: {list(meta.columns[:20])}")
-        print(f"         建议下载 MRILIST.rda（含 IMAGE_ID + DESCRIPTION 列）")
-        return _fallback_repeat_filter(df)
+        print(f"  [警告] rda 文件缺少 Image ID 或描述列（实际列名: {list(meta.columns[:15])}）")
+        return {}
 
     print(f"  使用列: {id_col} → {desc_col}")
-    print(f"  描述样本: {meta[desc_col].dropna().unique()[:8].tolist()}")
+    meta["_ID"] = pd.to_numeric(meta[id_col], errors="coerce").astype("Int64")
+    return (meta.dropna(subset=["_ID"])
+            .set_index("_ID")[desc_col]
+            .to_dict())
 
-    meta["IMAGEUID_INT"] = pd.to_numeric(meta[id_col], errors="coerce").astype("Int64")
-    desc_map = (meta.dropna(subset=["IMAGEUID_INT"])
-                .set_index("IMAGEUID_INT")[desc_col]
-                .to_dict())
 
-    df = df.copy()
-    df["SEQUENCE"] = df["IMAGEUID"].map(desc_map).fillna("")
-
-    # ── 第一步：绝对排除（无论何种描述均不保留）─────────────────────────────
-    # repeat/-R;  → 重扫版本（MPR-R;...）
-    # SENS        → Sensitivity 扫描变体
-    # 非 T1 模态  → fMRI / DTI / DWI / BOLD / pcASL / FLAIR / SWI / T2 等
-    # 衍生产品    → HarP / Reoriented / Brain Mask / MUSE（非原始结构像）
-    # 注意：不用 _2\b，因为 "Scaled_2" 是 ADNI1 正常扫描的描述后缀，不应排除
+def _apply_sequence_filters(df: pd.DataFrame) -> pd.DataFrame:
+    """在 df['SEQUENCE'] 上执行两阶段过滤（绝对排除 + MPR N3/Scaled 必要条件）。"""
+    # ── 第一步：绝对排除 ──────────────────────────────────────────────────
+    # repeat / MPR-R → 重扫版本
+    # SENS           → Sensitivity 扫描变体
+    # 非 T1 模态     → fMRI / DTI / DWI / BOLD / pcASL / FLAIR / SWI / T2
+    # 衍生产品       → HarP / Reoriented / Brain Mask / MUSE
     EXCLUDE = (
         r"(?i)(?:repeat|MPR-R|\bSENS\b"
         r"|fmri|dti|dwi|bold|pcasl|asl\b|flair|swi|t2\b"
@@ -204,20 +243,17 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     df = df[~is_unwanted].copy()
     print(f"  绝对排除后: {n_before} → {len(df)}（排除 {n_before - len(df)} 条）")
 
-    # ── 第二步：MPR 型扫描（ADNI1/2/GO）必须同时含 N3 和 Scaled ──────────────
-    # 目标描述：MPR; GradWarp; B1 Correction; N3; Scaled（或 Scaled_2 作备用）
-    # 无 N3 或无 Scaled 的 MPR 变体跳过；缺失的其他预处理步骤可在脚本中补充
-    # ADNI3/4 描述（如 "ADNI Brain T1 3T"）不含 MPR，不受此规则约束
-    is_mpr = df["SEQUENCE"].str.contains(r"(?i)\bMPR\b", regex=True, na=False)
+    # ── 第二步：MPR 型扫描必须同时含 N3 和 Scaled ─────────────────────────
+    # ADNI3/4（MT1; GradWarp; N3m 等格式）不含 MPR，不受此规则约束
+    # 缺失的 GradWarp / B1 等步骤可在预处理脚本中补充
+    is_mpr        = df["SEQUENCE"].str.contains(r"(?i)\bMPR\b",    regex=True, na=False)
     mpr_no_n3     = is_mpr & ~df["SEQUENCE"].str.contains(r"(?i)\bN3\b",     regex=True, na=False)
     mpr_no_scaled = is_mpr & ~df["SEQUENCE"].str.contains(r"(?i)\bScaled\b", regex=True, na=False)
-    is_incomplete_mpr = mpr_no_n3 | mpr_no_scaled
     n_before = len(df)
-    df = df[~is_incomplete_mpr].copy()
-    print(f"  MPR N3/Scaled 过滤后: {n_before} → {len(df)}（排除 {n_before - len(df)} 条缺 N3/Scaled 的 MPR）")
+    df = df[~(mpr_no_n3 | mpr_no_scaled)].copy()
+    print(f"  MPR N3/Scaled 过滤后: {n_before} → {len(df)}（排除 {n_before - len(df)} 条）")
 
-    # 统计最终序列分布
-    print(f"  保留的序列分布:")
+    print("  保留的序列分布:")
     print(df["SEQUENCE"].value_counts().head(10).to_string())
     return df
 
