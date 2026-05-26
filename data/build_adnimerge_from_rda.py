@@ -645,7 +645,9 @@ def build_adnimerge(rda_dir: str,
     for c in final_cols:
         if c not in merged.columns:
             merged[c] = np.nan
-    merged = merged[final_cols + [c for c in merged.columns if c not in final_cols]]
+    # final_cols 已定义所需列；FLDSTRENG 单独追加；其余内部列（如 PTDOB_YEAR）丢弃
+    keep_extra = ["FLDSTRENG"]
+    merged = merged[final_cols + [c for c in keep_extra if c in merged.columns]]
 
     # ── 按受试者 + 时间排序（VISCODE → month offset） ────────────────────────
     def _vc_to_month(vc):
