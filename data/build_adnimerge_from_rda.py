@@ -459,10 +459,13 @@ def compute_age(demo_df: pd.DataFrame,
             dob["PTDOB_MONTH"] = 7
         dob["PTDOB_MONTH"] = pd.to_numeric(dob["PTDOB_MONTH"],
                                             errors="coerce").fillna(7).astype(int)
+        # 转为整数再组字符串（避免 float → "1935.0-7-15" 无法解析的问题）
         dob["PTDOB_YEAR"] = pd.to_numeric(dob["PTDOB_YEAR"], errors="coerce")
+        year_s  = dob["PTDOB_YEAR"].apply(
+            lambda x: str(int(x)) if pd.notna(x) else np.nan)
+        month_s = dob["PTDOB_MONTH"].apply(lambda x: f"{int(x):02d}")
         dob["DOB_DATE"] = pd.to_datetime(
-            dob["PTDOB_YEAR"].astype(str) + "-" + dob["PTDOB_MONTH"].astype(str) + "-15",
-            errors="coerce",
+            year_s + "-" + month_s + "-15", errors="coerce"
         )
         merged = dxsum_df.merge(dob[["RID", "DOB_DATE"]], on="RID", how="left")
         merged["AGE"] = (pd.to_datetime(merged["EXAMDATE"], errors="coerce") -
