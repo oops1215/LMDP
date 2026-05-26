@@ -3,12 +3,58 @@ MRI / PET 图像预处理（全 Python 实现，替代论文中的 SPM12+MATLAB�
 
 流程（对应论文 Section IV.A）：
   1. 加载 NIfTI 图像
-  2. 使用 ANTsPy 配准到 MNI152 标准脑模板（替代 SPM12 normalization）
-  3. 裁剪到 128×160×128（去除边缘无关区域）
-  4. Min-max 归一化到 [0, 1]
-  5. 保存为 .npy 文件
+  2. [可选] N4 偏场校正（用于原始/轻度处理 MRI，已有 N3 的可跳过）
+  3. 使用 ANTsPy 配准到 MNI152 标准脑模板（替代 SPM12 normalization）
+  4. 裁剪到 128×160×128（去除边缘无关区域）
+  5. Min-max 归一化到 [0, 1]
+  6. 保存为 .npy 文件
 
-依赖安装：
+─────────────────────────────────────────────────────────────
+  ADNI MRI 应下载哪种预处理版本？
+─────────────────────────────────────────────────────────────
+
+  ADNI IDA 中同一次扫描通常有多个版本，按处理程度从低到高：
+
+  ① 原始    "MPRAGE"  / "Accelerated Sagittal MPRAGE"
+      - 只有最原始的 DICOM 数据，没有任何后处理
+      - 若下载此类型，必须开启 --n4（偏场校正）
+
+  ② 推荐 ★  "MPR; GradWarp; B1 Correction; N3; Scaled"
+      - GradWarp：梯度非线性失真校正（Scanner-level）
+      - B1 Correction：B1 场不均匀校正
+      - N3（非均匀强度校正）：已做偏场校正，相当于 N4
+      - Scaled：强度重新缩放
+      - 论文中 FreeSurfer (UCSFFSX*) 就在这个版本上运行的
+      - 下载此版本后 **无需** 开启 --n4，直接配准即可
+
+  核心原则：**IMAGEUID（Image Data ID）与 UCSFFSX*.rda 中记录的一致**
+  使用 data/generate_mri_download_list.py 提取 IMAGEUID，
+  在 IDA 按 Image Data ID 精确匹配，确保 MRI 与 FreeSurfer 体积一一对应。
+
+─────────────────────────────────────────────────────────────
+  两种下载版本的预处理差异
+─────────────────────────────────────────────────────────────
+
+  | 步骤              | 原始 MPRAGE     | N3-Scaled（推荐）|
+  |-------------------|-----------------|-----------------|
+  | N4 偏场校正       | 必须（--n4）    | 跳过            |
+  | ANTsPy 配准       | 相同            | 相同            |
+  | 裁剪 128×160×128  | 相同            | 相同            |
+  | Min-max 归一化    | 相同            | 相同            |
+
+  无论哪种，ANTsPy 配准流程完全相同；唯一区别是是否需要额外的偏场校正。
+
+─────────────────────────────────────────────────────────────
+  PET 图像推荐下载版本
+─────────────────────────────────────────────────────────────
+
+  Description 选择：
+    "FDG" + "Coreg, Avg, Std Img and Vox Siz, Uniform 6mm Res"
+  这是 ADNI 提供的标准化 FDG-PET（已 co-reg 到对应 MRI），可跳过 PET→MRI 配准。
+
+─────────────────────────────────────────────────────────────
+  依赖安装
+─────────────────────────────────────────────────────────────
   pip install antspyx nibabel nilearn tqdm
 
 MNI152 模板下载（选其一）：
@@ -33,6 +79,26 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
+
+
+# ─── N4 偏场校正 ─────────────────────────────────────────────────────────────
+
+def apply_n4_bias_correction(image_path: str) -> "ants.ANTsImage":
+    """
+    使用 ANTsPy 对 MRI 做 N4 偏场校正（ants.n4_bias_field_correction）。
+
+    何时使用：
+      - 下载的是原始 MPRAGE 或 "Accelerated Sagittal MPRAGE"（无 N3 标记）
+    何时跳过：
+      - 下载的是 "MPR; GradWarp; B1 Correction; N3; Scaled"（已含 N3 校正）
+
+    N4 是 N3 的改进版本，ADNI 的 N3 与 ANTsPy N4 效果接近；
+    对 N3-Scaled 图像再做 N4 不会造成损害但也没有必要。
+    """
+    import ants
+    img = ants.image_read(image_path).clone("float")
+    img_corrected = ants.n4_bias_field_correction(img)
+    return img_corrected
 
 
 # ─── 获取 MNI152 模板路径 ────────────────────────────────────────────────────
@@ -75,16 +141,19 @@ def get_mni152_template() -> str:
 
 def register_to_mni152(image_path: str,
                         template_path: str,
-                        type_of_transform: str = "SyN") -> np.ndarray:
+                        type_of_transform: str = "SyN",
+                        moving_image=None) -> np.ndarray:
     """
     将输入图像配准到 MNI152 空间。
     使用 SyN（非线性）配准，等同于 SPM12 的 Normalise(Write) 步骤。
 
     参数
     ----
-    image_path        : 输入 NIfTI 文件路径
+    image_path        : 输入 NIfTI 文件路径（当 moving_image 为 None 时使用）
     template_path     : MNI152 模板 NIfTI 路径
     type_of_transform : "SyN"（推荐）或 "Affine"（速度更快）
+    moving_image      : 已加载的 ANTsImage（例如 N4 校正后的结果），
+                        若提供则忽略 image_path
 
     返回
     ----
@@ -93,10 +162,10 @@ def register_to_mni152(image_path: str,
     import ants
 
     template = ants.image_read(template_path)
-    moving   = ants.image_read(image_path)
-
-    # 确保图像是浮点类型
-    moving = moving.clone("float")
+    if moving_image is not None:
+        moving = moving_image
+    else:
+        moving = ants.image_read(image_path).clone("float")
 
     reg = ants.registration(
         fixed=template,
@@ -175,24 +244,37 @@ def minmax_normalize(img_arr: np.ndarray) -> np.ndarray:
 def preprocess_single_image(image_path: str,
                              template_path: str,
                              output_path: str,
-                             transform_type: str = "SyN") -> bool:
+                             transform_type: str = "SyN",
+                             apply_n4: bool = False) -> bool:
     """
     对单张 MRI 或 PET 图像执行完整预处理，保存为 .npy 文件。
     返回 True 表示成功，False 表示跳过（已存在）或出错。
+
+    参数
+    ----
+    apply_n4  : 是否先做 N4 偏场校正。
+                True  → 适合原始 MPRAGE（无 N3 校正）
+                False → 适合 "MPR; GradWarp; B1 Correction; N3; Scaled"（已含 N3）
     """
     if os.path.exists(output_path):
         return True  # 已存在，跳过
 
     try:
-        # 1. 配准
-        registered = register_to_mni152(image_path, template_path, transform_type)
-        # 2. 裁剪
+        # 1. [可选] N4 偏场校正
+        moving_image = None
+        if apply_n4:
+            moving_image = apply_n4_bias_correction(image_path)
+
+        # 2. 配准到 MNI152
+        registered = register_to_mni152(image_path, template_path, transform_type,
+                                         moving_image=moving_image)
+        # 3. 裁剪
         cropped = crop_image(registered)
         assert cropped.shape == Config.TARGET_SHAPE, \
             f"裁剪后形状异常: {cropped.shape} != {Config.TARGET_SHAPE}"
-        # 3. 归一化
+        # 4. 归一化
         normalized = minmax_normalize(cropped)
-        # 4. 保存
+        # 5. 保存
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         np.save(output_path, normalized)
         return True
@@ -227,7 +309,8 @@ def preprocess_all(mri_raw_dir: str   = Config.MRI_RAW_DIR,
                    mri_out_dir: str   = Config.MRI_PREP_DIR,
                    pet_out_dir: str   = Config.PET_PREP_DIR,
                    transform_type: str = "SyN",
-                   pet_use_mri_ref: bool = False) -> None:
+                   pet_use_mri_ref: bool = False,
+                   apply_n4: bool = False) -> None:
     """
     批量预处理所有 MRI 和 PET 图像。
 
@@ -239,12 +322,18 @@ def preprocess_all(mri_raw_dir: str   = Config.MRI_RAW_DIR,
     pet_out_dir      : 预处理后 PET .npy 文件输出目录
     transform_type   : "SyN"（精度高，慢）或 "Affine"（速度快，精度略低）
     pet_use_mri_ref  : True = PET 先对齐到 MRI 再到 MNI（适合未 co-reg 的 PET）
+    apply_n4         : True = 对 MRI 做 N4 偏场校正（适合原始 MPRAGE，无 N3 校正）
+                       False（默认）= 跳过，适合 "MPR; GradWarp; B1 Correction; N3; Scaled"
     """
     os.makedirs(mri_out_dir, exist_ok=True)
     os.makedirs(pet_out_dir, exist_ok=True)
 
     template_path = get_mni152_template()
     print(f"MNI152 模板: {template_path}")
+    if apply_n4:
+        print("N4 偏场校正: 已启用（适合原始 MPRAGE）")
+    else:
+        print("N4 偏场校正: 已跳过（适合 N3-Scaled 版本，推荐下载此版本）")
 
     # ── 处理 MRI ─────────────────────────────────────────────────────────────
     mri_files = sorted(glob.glob(os.path.join(mri_raw_dir, "*.nii*")))
@@ -254,7 +343,8 @@ def preprocess_all(mri_raw_dir: str   = Config.MRI_RAW_DIR,
     for mri_path in tqdm(mri_files, desc="MRI 预处理"):
         fname  = os.path.splitext(os.path.basename(mri_path))[0].replace(".nii", "")
         outpath = os.path.join(mri_out_dir, fname + ".npy")
-        ok = preprocess_single_image(mri_path, template_path, outpath, transform_type)
+        ok = preprocess_single_image(mri_path, template_path, outpath,
+                                      transform_type, apply_n4=apply_n4)
         if ok:
             mri_ok += 1
         else:
@@ -285,7 +375,7 @@ def preprocess_all(mri_raw_dir: str   = Config.MRI_RAW_DIR,
                 ok = preprocess_single_image(
                     pet_path, template_path, outpath, transform_type)
         else:
-            # ADNI Co-registered PET：直接配准到 MNI152
+            # ADNI Co-registered PET：直接配准到 MNI152（PET 无需 N4）
             ok = preprocess_single_image(
                 pet_path, template_path, outpath, transform_type)
 
@@ -323,6 +413,12 @@ if __name__ == "__main__":
                         help="SyN=精度高/慢，Affine=速度快/精度略低")
     parser.add_argument("--pet_mri_ref", action="store_true",
                         help="PET 先对齐到 MRI 再到 MNI（未 co-reg PET 使用此选项）")
+    parser.add_argument("--n4", action="store_true",
+                        help=(
+                            "对 MRI 做 N4 偏场校正。\n"
+                            "原始 MPRAGE 下载时使用；\n"
+                            "若下载的是 'MPR; GradWarp; B1 Correction; N3; Scaled' 则无需此选项。"
+                        ))
     args = parser.parse_args()
 
     preprocess_all(
@@ -330,4 +426,5 @@ if __name__ == "__main__":
         pet_raw_dir=args.pet_dir,
         transform_type=args.transform,
         pet_use_mri_ref=args.pet_mri_ref,
+        apply_n4=args.n4,
     )
