@@ -664,6 +664,9 @@ def build_adnimerge(rda_dir: str,
     merged = merged.sort_values(["RID", "_sort_month"]).drop(columns=["_sort_month"])
     merged = merged.reset_index(drop=True)
 
+    # ── 过滤异常 VISCODE（保留 bl 和 mXX 格式，丢弃 uns1、空字符串等）────────
+    merged = merged[merged["VISCODE"].str.match(r"^(bl|m\d+)$", na=False)].copy()
+
     # ── 保存 ────────────────────────────────────────────────────────────────
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     merged.to_csv(output_path, index=False)
