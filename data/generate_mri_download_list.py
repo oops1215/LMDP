@@ -168,12 +168,16 @@ def generate_download_list(rda_dir: str, output_path: str) -> None:
         print(f"\n磁场强度分布:")
         print(df_target["FLDSTRENG"].value_counts().to_string())
 
-    # 生成 ADNI IDA 搜索用的 Image ID 列表（逗号分隔）
+    # 生成 ADNI IDA 搜索用的 Image ID 列表（两种格式）
     id_list = df_target["IMAGEUID"].dropna().astype(int).tolist()
     id_file = output_path.replace(".csv", "_ids_only.txt")
     with open(id_file, "w") as f:
         f.write("\n".join(str(i) for i in id_list))
-    print(f"\n纯 ID 列表（粘贴到 ADNI IDA 搜索框）: {id_file}")
+    id_file_csv = output_path.replace(".csv", "_ids_comma.txt")
+    with open(id_file_csv, "w") as f:
+        f.write(",".join(str(i) for i in id_list))
+    print(f"\n纯 ID 列表（每行一个，ADNI IDA 文件上传）: {id_file}")
+    print(f"逗号分隔 ID（粘贴到 ADNI IDA 搜索框）: {id_file_csv}")
     print(f"共 {len(id_list)} 个 Image ID")
 
 
