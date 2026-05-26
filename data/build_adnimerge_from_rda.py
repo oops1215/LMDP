@@ -392,6 +392,10 @@ def load_freesurfer_single(rda_dir: str, filename: str) -> Optional[pd.DataFrame
     out = df[["RID", "VISCODE_STD"]].copy()
     out = out.rename(columns={"VISCODE_STD": "VISCODE"})
 
+    # 磁场强度（1.5 or 3T） — 用于后续协变量或分层分析
+    fld_col = find_col(df, ["FLDSTRENG", "FIELDSTRENGTH", "FIELD_STRENGTH"], "FLDSTRENG")
+    out["FLDSTRENG"] = pd.to_numeric(df[fld_col], errors="coerce") if fld_col else np.nan
+
     # ICV（单列）
     for var, candidates in FS_SINGLE_COLS.items():
         col = find_col(df, candidates, var)
@@ -405,7 +409,9 @@ def load_freesurfer_single(rda_dir: str, filename: str) -> Optional[pd.DataFrame
     out = out.drop_duplicates(subset=["RID", "VISCODE"], keep="first")
     out = normalize_rid(out)
     n_valid = out[["Hippocampus", "Ventricles", "ICV"]].notna().all(axis=1).sum()
-    print(f"    {filename}: {len(out)} 行，含三项指标 {n_valid} 条")
+    n_3t = (out["FLDSTRENG"] == 3).sum() if "FLDSTRENG" in out.columns else 0
+    n_15t = (out["FLDSTRENG"] == 1.5).sum() if "FLDSTRENG" in out.columns else 0
+    print(f"    {filename}: {len(out)} 行，含三项指标 {n_valid} 条  (1.5T={n_15t}, 3T={n_3t})")
     return out
 
 
