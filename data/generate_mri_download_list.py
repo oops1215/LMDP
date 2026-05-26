@@ -129,52 +129,67 @@ def extract_imageids_from_fs(rda_dir: str) -> pd.DataFrame:
 
 def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     """
-    用 MRILIST.rda 为每个 IMAGEUID 补充图像描述，过滤掉 Repeat 扫描。
+    用 MRIMETA.rda / MRI3META.rda 为每个 IMAGEUID 补充序列描述，
+    过滤掉 Repeat 扫描和非目标序列。
 
     ADNI 命名规则：
-      - 正常扫描：MPR; GradWarp; B1 Correction; N3; Scaled
-      - Repeat 扫描：MPR-R; GradWarp; B1 Correction; N3; Scaled（含 -R 或 REPEAT）
-      - Sensitivity 变体：MPR; ; N3; Scaled 2（含 SENS 或 _2）
-    只保留主扫描（Description 不含 REPEAT / -R / SENS）。
-    若 MRILIST.rda 不存在则跳过过滤，原样返回。
+      - 正常：MPR; GradWarp; B1 Correction; N3; Scaled
+      - Repeat：MPR-R; GradWarp... 或 SEQUENCE 含 REPEAT / -R
+      - Sensitivity：MPR; ; N3; Scaled 2（SENS / _2 结尾）
     """
-    mrilist_path = os.path.join(rda_dir, "MRILIST.rda")
-    if not os.path.exists(mrilist_path):
-        print("  [提示] 未找到 MRILIST.rda，跳过 Repeat 过滤")
+    # 合并 MRIMETA（ADNI1/2/GO）和 MRI3META（ADNI3/4）
+    frames = []
+    for fname in ["MRIMETA.rda", "MRI3META.rda"]:
+        path = os.path.join(rda_dir, fname)
+        if not os.path.exists(path):
+            continue
+        try:
+            import pyreadr
+            result = pyreadr.read_r(path)
+            mri = result[list(result.keys())[0]]
+            mri.columns = [c.upper() for c in mri.columns]
+            frames.append(mri)
+            print(f"  读取 {fname}: {len(mri)} 行")
+        except Exception as e:
+            print(f"  [警告] 读取 {fname} 失败: {e}")
+
+    if not frames:
+        print("  [提示] 未找到 MRIMETA.rda / MRI3META.rda，跳过 Repeat 过滤")
         return df
 
-    try:
-        import pyreadr
-        result = pyreadr.read_r(mrilist_path)
-        mri = result[list(result.keys())[0]]
-        mri.columns = [c.upper() for c in mri.columns]
-    except Exception as e:
-        print(f"  [警告] 读取 MRILIST.rda 失败: {e}，跳过过滤")
-        return df
+    meta = pd.concat(frames, ignore_index=True)
 
-    # MRILIST 中 Image ID 字段名可能是 IMAGEUID 或 IMAGE_ID
-    id_col = next((c for c in ["IMAGEUID","IMAGE_ID","IMAGEID"] if c in mri.columns), None)
-    desc_col = next((c for c in ["DESCRIPTION","IMAGEDESC","SERIES_DESCRIPTION"] if c in mri.columns), None)
+    # 找 Image ID 列
+    id_col = next((c for c in ["IMAGEUID", "IMAGE_ID", "IMAGEID"] if c in meta.columns), None)
+    # 找描述列（MRIMETA 通常用 SEQUENCE 或 MRITYPE 或 SERIESTYPE）
+    desc_col = next((c for c in ["SEQUENCE", "MRITYPE", "SERIESTYPE",
+                                  "DESCRIPTION", "IMAGEDESC"] if c in meta.columns), None)
     if id_col is None or desc_col is None:
-        print(f"  [警告] MRILIST.rda 缺少 Image ID 或 Description 列，跳过过滤")
-        print(f"         实际列名: {list(mri.columns[:15])}")
+        print(f"  [警告] MRIMETA 缺少 Image ID 或描述列，跳过过滤")
+        print(f"         实际列名: {list(meta.columns[:20])}")
         return df
 
-    mri["IMAGEUID_INT"] = pd.to_numeric(mri[id_col], errors="coerce").astype("Int64")
-    desc_map = mri.dropna(subset=["IMAGEUID_INT"]).set_index("IMAGEUID_INT")[desc_col].to_dict()
+    print(f"  使用列: {id_col} → {desc_col}")
+    print(f"  描述样本: {meta[desc_col].dropna().unique()[:8].tolist()}")
+
+    meta["IMAGEUID_INT"] = pd.to_numeric(meta[id_col], errors="coerce").astype("Int64")
+    desc_map = (meta.dropna(subset=["IMAGEUID_INT"])
+                .set_index("IMAGEUID_INT")[desc_col]
+                .to_dict())
 
     df = df.copy()
-    df["DESCRIPTION"] = df["IMAGEUID"].map(desc_map).fillna("")
+    df["SEQUENCE"] = df["IMAGEUID"].map(desc_map).fillna("")
 
-    # 过滤 Repeat / Sensitivity 等非主扫描
-    EXCLUDE_PATTERNS = ["REPEAT", "MPR-R", " -R;", "_2", "SENS", "REPEAT"]
-    is_repeat = df["DESCRIPTION"].str.upper().str.contains(
-        "|".join(EXCLUDE_PATTERNS), regex=True, na=False
-    )
+    # 过滤 Repeat / Sensitivity / 非 T1 结构像
+    EXCLUDE = r"(?i)(repeat|-R;|_2\b|SENS\b|fmri|dti|dwi|bold|pcasl|asl|flair|swi|t2)"
+    is_unwanted = df["SEQUENCE"].str.contains(EXCLUDE, regex=True, na=False)
     n_before = len(df)
-    df = df[~is_repeat].copy()
-    n_after = len(df)
-    print(f"  Repeat/变体过滤: {n_before} → {n_after}（排除 {n_before - n_after} 条）")
+    df = df[~is_unwanted].copy()
+    print(f"  过滤前: {n_before}  →  过滤后: {len(df)}（排除 {n_before - len(df)} 条 Repeat/非T1）")
+
+    # 统计最终序列分布
+    print(f"  保留的序列分布:")
+    print(df["SEQUENCE"].value_counts().head(10).to_string())
     return df
 
 
