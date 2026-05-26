@@ -132,17 +132,19 @@ def extract_imageids_from_fs(rda_dir: str) -> pd.DataFrame:
 
 def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     """
-    用 MRIMETA.rda / MRI3META.rda 为每个 IMAGEUID 补充序列描述，
-    过滤掉 Repeat 扫描和非目标序列。
+    用图像级元数据为每个 IMAGEUID 补充序列描述，过滤掉 Repeat 扫描和非目标序列。
+
+    优先读取包含 IMAGEUID + DESCRIPTION 的图像列表文件（MRILIST.rda / MRI3LIST.rda）；
+    若不存在则尝试 MRIMETA.rda / MRI3META.rda（协议参数表，通常无 IMAGEUID，会触发回退）。
 
     ADNI 命名规则：
       - 正常：MPR; GradWarp; B1 Correction; N3; Scaled 或 Scaled_2（均为正常 ADNI1 扫描）
-      - Repeat：MPR-R; GradWarp... 或 SEQUENCE 含 REPEAT（关键词）
-      - Sensitivity：MPR; ; N3; Scaled 或含 SENS 关键词
+      - Repeat：MPR-R; GradWarp... / MPRAGE REPEAT / MPRAGE_ASO_repeat 等（含 repeat/MPR-R）
+      - Sensitivity：含 SENS 关键词
     """
-    # 合并 MRIMETA（ADNI1/2/GO）和 MRI3META（ADNI3/4）
+    # 按优先顺序依次尝试：图像列表文件（有 IMAGEUID）> 协议参数文件（通常无 IMAGEUID）
     frames = []
-    for fname in ["MRIMETA.rda", "MRI3META.rda"]:
+    for fname in ["MRILIST.rda", "MRI3LIST.rda", "MRIMETA.rda", "MRI3META.rda"]:
         path = os.path.join(rda_dir, fname)
         if not os.path.exists(path):
             continue
@@ -157,19 +159,22 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
             print(f"  [警告] 读取 {fname} 失败: {e}")
 
     if not frames:
-        print("  [提示] 未找到 MRIMETA.rda / MRI3META.rda，改用关键字回退过滤")
+        print("  [提示] 未找到任何图像元数据文件，改用关键字回退过滤")
+        print("         建议从 ADNI LONI 下载 MRILIST.csv 并转换为 MRILIST.rda")
         return _fallback_repeat_filter(df)
 
     meta = pd.concat(frames, ignore_index=True)
 
-    # 找 Image ID 列
-    id_col = next((c for c in ["IMAGEUID", "IMAGE_ID", "IMAGEID"] if c in meta.columns), None)
-    # 找描述列（MRIMETA 通常用 SEQUENCE 或 MRITYPE 或 SERIESTYPE）
-    desc_col = next((c for c in ["SEQUENCE", "MRITYPE", "SERIESTYPE",
-                                  "DESCRIPTION", "IMAGEDESC"] if c in meta.columns), None)
+    # 找 Image ID 列（MRILIST 用 IMAGE_ID；MRIMETA 可能用 IMAGEUID）
+    id_col = next((c for c in ["IMAGE_ID", "IMAGEUID", "IMAGEID", "IMAGE_DATA_ID"]
+                   if c in meta.columns), None)
+    # 找描述列（MRILIST 用 DESCRIPTION；MRIMETA 用 SEQUENCE / MRITYPE 等）
+    desc_col = next((c for c in ["DESCRIPTION", "SEQUENCE", "MRITYPE", "SERIESTYPE",
+                                  "IMAGEDESC", "SERIES_DESCRIPTION"] if c in meta.columns), None)
     if id_col is None or desc_col is None:
-        print(f"  [警告] MRIMETA 缺少 Image ID 或描述列，改用关键字回退过滤")
+        print(f"  [警告] 元数据文件缺少 Image ID 或描述列，改用关键字回退过滤")
         print(f"         实际列名: {list(meta.columns[:20])}")
+        print(f"         建议下载 MRILIST.rda（含 IMAGE_ID + DESCRIPTION 列）")
         return _fallback_repeat_filter(df)
 
     print(f"  使用列: {id_col} → {desc_col}")
@@ -190,7 +195,7 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     # 衍生产品    → HarP / Reoriented / Brain Mask / MUSE（非原始结构像）
     # 注意：不用 _2\b，因为 "Scaled_2" 是 ADNI1 正常扫描的描述后缀，不应排除
     EXCLUDE = (
-        r"(?i)(repeat|MPR-R|\bSENS\b"
+        r"(?i)(?:repeat|MPR-R|\bSENS\b"
         r"|fmri|dti|dwi|bold|pcasl|asl\b|flair|swi|t2\b"
         r"|\bharp\b|reoriented|brain[\s_]?mask|\bmuse\b)"
     )
@@ -225,7 +230,7 @@ def _fallback_repeat_filter(df: pd.DataFrame) -> pd.DataFrame:
     """
     if "PREFERRED_DESC" not in df.columns:
         return df
-    EXCLUDE = r"(?i)(repeat|MPR-R|\bSENS\b|\bharp\b|reoriented|brain[\s_]?mask|\bmuse\b)"
+    EXCLUDE = r"(?i)(?:repeat|MPR-R|\bSENS\b|\bharp\b|reoriented|brain[\s_]?mask|\bmuse\b)"
     is_unwanted = df["PREFERRED_DESC"].str.contains(EXCLUDE, regex=True, na=False)
     n_bad = is_unwanted.sum()
     if n_bad:
