@@ -41,7 +41,9 @@ FS_SINGLE_COLS = {
         "ST10SV", "BrainSegVol",
     ],
     "WholeBrain": [
-        "ST133SV", "ST133CV", "BrainSegVol", "BrainSegVolNotVent",
+        "ST11SV",                                    # ADNI UCSFFSX 실제 컬럼명
+        "ST133SV", "ST133CV", "ST132SV", "ST132CV",  # 일부 버전
+        "BrainSegVol", "BrainSegVolNotVent",
         "WholeBrain", "TotalBrainVol",
     ],
 }
