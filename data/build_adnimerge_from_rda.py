@@ -393,8 +393,14 @@ def load_freesurfer_single(rda_dir: str, filename: str) -> Optional[pd.DataFrame
     out = out.rename(columns={"VISCODE_STD": "VISCODE"})
 
     # 磁场强度（1.5 or 3T） — 用于后续协变量或分层分析
+    # ADNI 编码：UCSFFSX 用浮点数 1.5/3.0；UCSFFSX51+ 用整数 1/3 → 统一转为 1.5/3.0
     fld_col = find_col(df, ["FLDSTRENG", "FIELDSTRENGTH", "FIELD_STRENGTH"], "FLDSTRENG")
-    out["FLDSTRENG"] = pd.to_numeric(df[fld_col], errors="coerce") if fld_col else np.nan
+    if fld_col:
+        fld_raw = pd.to_numeric(df[fld_col], errors="coerce")
+        fld_raw = fld_raw.map(lambda x: 1.5 if x == 1 else (3.0 if x == 3 else x))
+        out["FLDSTRENG"] = fld_raw
+    else:
+        out["FLDSTRENG"] = np.nan
 
     # ICV（单列）
     for var, candidates in FS_SINGLE_COLS.items():
@@ -640,6 +646,21 @@ def build_adnimerge(rda_dir: str,
         if c not in merged.columns:
             merged[c] = np.nan
     merged = merged[final_cols + [c for c in merged.columns if c not in final_cols]]
+
+    # ── 按受试者 + 时间排序（VISCODE → month offset） ────────────────────────
+    def _vc_to_month(vc):
+        if vc == "bl":
+            return 0
+        if isinstance(vc, str) and vc.startswith("m"):
+            try:
+                return int(vc[1:])
+            except ValueError:
+                return 9999
+        return 9999
+
+    merged["_sort_month"] = merged["VISCODE"].apply(_vc_to_month)
+    merged = merged.sort_values(["RID", "_sort_month"]).drop(columns=["_sort_month"])
+    merged = merged.reset_index(drop=True)
 
     # ── 保存 ────────────────────────────────────────────────────────────────
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
