@@ -126,7 +126,7 @@ def extract_imageids_from_fs(rda_dir: str) -> pd.DataFrame:
     # 这样 drop_duplicates(keep="first") 保留的永远是最接近 primary scan 的那条
     def _scan_priority(desc: str) -> int:
         d = str(desc).lower()
-        if "repeat" in d or "-r;" in d:
+        if "repeat" in d or "mpr-r" in d or "-r;" in d:
             return 10   # repeat — 最不优先
         if "sens" in d:
             return 8    # sensitivity variant
@@ -199,14 +199,33 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     df = df.copy()
     df["SEQUENCE"] = df["IMAGEUID"].map(desc_map).fillna("")
 
-    # 过滤 Repeat / Sensitivity / 非 T1 结构像
-    # 注意：不用 _2\b，因为 "Scaled_2" 是 ADNI1 正常扫描的描述后缀
-    # "MPRAGE REPEAT" / "MPR-R;" 才是 repeat 标志；"SENS" / "MPRAGE SENS" 是 sensitivity
-    EXCLUDE = r"(?i)(repeat\b|-R;|\bSENS\b|fmri|dti|dwi|bold|pcasl|asl\b|flair|swi|t2\b)"
+    # ── 第一步：绝对排除（无论何种描述均不保留）─────────────────────────────
+    # repeat/-R;  → 重扫版本（MPR-R;...）
+    # SENS        → Sensitivity 扫描变体
+    # 非 T1 模态  → fMRI / DTI / DWI / BOLD / pcASL / FLAIR / SWI / T2 等
+    # 衍生产品    → HarP / Reoriented / Brain Mask / MUSE（非原始结构像）
+    # 注意：不用 _2\b，因为 "Scaled_2" 是 ADNI1 正常扫描的描述后缀，不应排除
+    EXCLUDE = (
+        r"(?i)(repeat|MPR-R|\bSENS\b"
+        r"|fmri|dti|dwi|bold|pcasl|asl\b|flair|swi|t2\b"
+        r"|\bharp\b|reoriented|brain[\s_]?mask|\bmuse\b)"
+    )
     is_unwanted = df["SEQUENCE"].str.contains(EXCLUDE, regex=True, na=False)
     n_before = len(df)
     df = df[~is_unwanted].copy()
-    print(f"  过滤前: {n_before}  →  过滤后: {len(df)}（排除 {n_before - len(df)} 条 Repeat/非T1）")
+    print(f"  绝对排除后: {n_before} → {len(df)}（排除 {n_before - len(df)} 条）")
+
+    # ── 第二步：MPR 型扫描（ADNI1/2/GO）必须同时含 N3 和 Scaled ──────────────
+    # 目标描述：MPR; GradWarp; B1 Correction; N3; Scaled（或 Scaled_2 作备用）
+    # 无 N3 或无 Scaled 的 MPR 变体跳过；缺失的其他预处理步骤可在脚本中补充
+    # ADNI3/4 描述（如 "ADNI Brain T1 3T"）不含 MPR，不受此规则约束
+    is_mpr = df["SEQUENCE"].str.contains(r"(?i)\bMPR\b", regex=True, na=False)
+    mpr_no_n3     = is_mpr & ~df["SEQUENCE"].str.contains(r"(?i)\bN3\b",     regex=True, na=False)
+    mpr_no_scaled = is_mpr & ~df["SEQUENCE"].str.contains(r"(?i)\bScaled\b", regex=True, na=False)
+    is_incomplete_mpr = mpr_no_n3 | mpr_no_scaled
+    n_before = len(df)
+    df = df[~is_incomplete_mpr].copy()
+    print(f"  MPR N3/Scaled 过滤后: {n_before} → {len(df)}（排除 {n_before - len(df)} 条缺 N3/Scaled 的 MPR）")
 
     # 统计最终序列分布
     print(f"  保留的序列分布:")
@@ -217,16 +236,16 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
 def _fallback_repeat_filter(df: pd.DataFrame) -> pd.DataFrame:
     """
     当 MRIMETA 不可用时，利用 PREFERRED_DESC（来自 UCSFFSX 文件名推断）
-    做简单的关键字过滤。只能过滤掉明确含 repeat/-R/SENS 关键字的 SEQUENCE，
+    做简单的关键字过滤。只能过滤掉明确含 repeat/-R/SENS/衍生产品关键字的记录，
     无法对无描述信息的 ID 做判断。
     """
     if "PREFERRED_DESC" not in df.columns:
         return df
-    EXCLUDE = r"(?i)(repeat\b|-R;|\bSENS\b)"
+    EXCLUDE = r"(?i)(repeat|MPR-R|\bSENS\b|\bharp\b|reoriented|brain[\s_]?mask|\bmuse\b)"
     is_unwanted = df["PREFERRED_DESC"].str.contains(EXCLUDE, regex=True, na=False)
     n_bad = is_unwanted.sum()
     if n_bad:
-        print(f"  回退过滤: 排除 {n_bad} 条含 Repeat/SENS 关键字的记录")
+        print(f"  回退过滤: 排除 {n_bad} 条含 Repeat/SENS/衍生产品关键字的记录")
     return df[~is_unwanted].copy()
 
 
