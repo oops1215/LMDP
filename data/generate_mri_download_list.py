@@ -120,8 +120,11 @@ def extract_imageids_from_fs(rda_dir: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     combined = pd.concat(frames, ignore_index=True)
-    # 同一 RID+VISCODE 保留最新处理结果（最后加载的文件优先）
-    combined = combined.drop_duplicates(subset=["RID","VISCODE"], keep="last")
+    # 同一 RID+VISCODE 可能有多条（ADNI 对同一访视处理了多个扫描）
+    # 保留最小 IMAGEUID（编号最小 = 最早采集，通常是 primary scan 而非 repeat）
+    combined = (combined
+                .sort_values("IMAGEUID")
+                .drop_duplicates(subset=["RID","VISCODE"], keep="first"))
     combined = combined.sort_values(["RID","VISCODE"]).reset_index(drop=True)
     print(f"\n汇总: {len(combined)} 条记录，{combined['RID'].nunique()} 名受试者")
     return combined
@@ -133,9 +136,9 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     过滤掉 Repeat 扫描和非目标序列。
 
     ADNI 命名规则：
-      - 正常：MPR; GradWarp; B1 Correction; N3; Scaled
-      - Repeat：MPR-R; GradWarp... 或 SEQUENCE 含 REPEAT / -R
-      - Sensitivity：MPR; ; N3; Scaled 2（SENS / _2 结尾）
+      - 正常：MPR; GradWarp; B1 Correction; N3; Scaled 或 Scaled_2（均为正常 ADNI1 扫描）
+      - Repeat：MPR-R; GradWarp... 或 SEQUENCE 含 REPEAT（关键词）
+      - Sensitivity：MPR; ; N3; Scaled 或含 SENS 关键词
     """
     # 合并 MRIMETA（ADNI1/2/GO）和 MRI3META（ADNI3/4）
     frames = []
@@ -154,8 +157,8 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
             print(f"  [警告] 读取 {fname} 失败: {e}")
 
     if not frames:
-        print("  [提示] 未找到 MRIMETA.rda / MRI3META.rda，跳过 Repeat 过滤")
-        return df
+        print("  [提示] 未找到 MRIMETA.rda / MRI3META.rda，改用关键字回退过滤")
+        return _fallback_repeat_filter(df)
 
     meta = pd.concat(frames, ignore_index=True)
 
@@ -165,9 +168,9 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     desc_col = next((c for c in ["SEQUENCE", "MRITYPE", "SERIESTYPE",
                                   "DESCRIPTION", "IMAGEDESC"] if c in meta.columns), None)
     if id_col is None or desc_col is None:
-        print(f"  [警告] MRIMETA 缺少 Image ID 或描述列，跳过过滤")
+        print(f"  [警告] MRIMETA 缺少 Image ID 或描述列，改用关键字回退过滤")
         print(f"         实际列名: {list(meta.columns[:20])}")
-        return df
+        return _fallback_repeat_filter(df)
 
     print(f"  使用列: {id_col} → {desc_col}")
     print(f"  描述样本: {meta[desc_col].dropna().unique()[:8].tolist()}")
@@ -181,7 +184,9 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     df["SEQUENCE"] = df["IMAGEUID"].map(desc_map).fillna("")
 
     # 过滤 Repeat / Sensitivity / 非 T1 结构像
-    EXCLUDE = r"(?i)(repeat|-R;|_2\b|SENS\b|fmri|dti|dwi|bold|pcasl|asl|flair|swi|t2)"
+    # 注意：不用 _2\b，因为 "Scaled_2" 是 ADNI1 正常扫描的描述后缀
+    # "MPRAGE REPEAT" / "MPR-R;" 才是 repeat 标志；"SENS" / "MPRAGE SENS" 是 sensitivity
+    EXCLUDE = r"(?i)(repeat\b|-R;|\bSENS\b|fmri|dti|dwi|bold|pcasl|asl\b|flair|swi|t2\b)"
     is_unwanted = df["SEQUENCE"].str.contains(EXCLUDE, regex=True, na=False)
     n_before = len(df)
     df = df[~is_unwanted].copy()
@@ -191,6 +196,22 @@ def filter_by_description(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
     print(f"  保留的序列分布:")
     print(df["SEQUENCE"].value_counts().head(10).to_string())
     return df
+
+
+def _fallback_repeat_filter(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    当 MRIMETA 不可用时，利用 PREFERRED_DESC（来自 UCSFFSX 文件名推断）
+    做简单的关键字过滤。只能过滤掉明确含 repeat/-R/SENS 关键字的 SEQUENCE，
+    无法对无描述信息的 ID 做判断。
+    """
+    if "PREFERRED_DESC" not in df.columns:
+        return df
+    EXCLUDE = r"(?i)(repeat\b|-R;|\bSENS\b)"
+    is_unwanted = df["PREFERRED_DESC"].str.contains(EXCLUDE, regex=True, na=False)
+    n_bad = is_unwanted.sum()
+    if n_bad:
+        print(f"  回退过滤: 排除 {n_bad} 条含 Repeat/SENS 关键字的记录")
+    return df[~is_unwanted].copy()
 
 
 def add_ptid(df: pd.DataFrame, rda_dir: str) -> pd.DataFrame:
