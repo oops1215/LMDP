@@ -234,25 +234,24 @@ def load_pet_from_rda(rda_dir: str) -> pd.DataFrame:
 # ── 按 MRI 清单过滤 ────────────────────────────────────────────────────────
 
 def filter_by_mri_list(pet_df: pd.DataFrame, mri_list_path: str) -> pd.DataFrame:
-    """只保留 MRI 下载清单中出现的 PTID+VISCODE 组合。"""
+    """
+    只保留 MRI 下载清单中出现的受试者（PTID 级别）。
+    不要求访视必须有 MRI——模型可以处理 PET-only 访视。
+    """
     mri = pd.read_csv(mri_list_path)
-    mri["VISCODE"] = mri["VISCODE"].apply(standardize_viscode)
 
-    # 建目标集合
     if "PTID" in mri.columns and "PTID" in pet_df.columns:
-        target = set(zip(mri["PTID"].astype(str), mri["VISCODE"]))
-        mask = [( str(r.get("PTID","")), r.get("VISCODE","") ) in target
-                for _, r in pet_df.iterrows()]
+        valid_ptids = set(mri["PTID"].astype(str))
+        mask = pet_df["PTID"].astype(str).isin(valid_ptids)
     elif "RID" in mri.columns and "RID" in pet_df.columns:
-        target = set(zip(mri["RID"].astype(str), mri["VISCODE"]))
-        mask = [( str(r.get("RID","")), r.get("VISCODE","") ) in target
-                for _, r in pet_df.iterrows()]
+        valid_rids = set(mri["RID"].astype(str))
+        mask = pet_df["RID"].astype(str).isin(valid_rids)
     else:
         print("  [警告] 无法匹配 PTID/RID，跳过过滤")
         return pet_df
 
     filtered = pet_df[mask].copy()
-    print(f"  按 MRI 清单过滤: {len(pet_df)} → {len(filtered)} 条")
+    print(f"  按 MRI 受试者过滤（PTID 级别）: {len(pet_df)} → {len(filtered)} 条")
     return filtered
 
 
