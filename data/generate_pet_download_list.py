@@ -158,6 +158,11 @@ def load_pet_from_ida_csv(rda_dir: str) -> pd.DataFrame:
         meta = meta[is_fdg].copy()
         print(f"  FDG 过滤: {n_before} → {len(meta)} 条")
 
+    # 排除 Dynamic 序列（动态采集，非标准静态图像）
+    if desc_col:
+        is_dynamic = meta[desc_col].str.contains(r"(?i)dynamic", na=False)
+        meta = meta[~is_dynamic].copy()
+
     result = pd.DataFrame()
     result["IMAGEUID"] = pd.to_numeric(meta[id_col], errors="coerce").astype("Int64")
     if subj_col:
@@ -166,6 +171,20 @@ def load_pet_from_ida_csv(rda_dir: str) -> pd.DataFrame:
         result["VISCODE"] = meta[visit_col].apply(visit_to_viscode)
     if desc_col:
         result["DESCRIPTION"] = meta[desc_col]
+        # 描述优先级：Uniform 6mm Res(0) > Uniform Resolution(1) >
+        #             Standardized Image and Voxel Size(2) > Co-reg Averaged(3)
+        def _pet_priority(d: str) -> int:
+            d = str(d).lower()
+            if "uniform 6mm res" in d:   return 0
+            if "uniform resolution" in d: return 1
+            if "standardized image" in d: return 2
+            if "co-registered, averaged" in d or "coreg, avg" in d: return 3
+            return 9
+        result["_PRI"] = result["DESCRIPTION"].apply(_pet_priority)
+        print("  描述优先级分布:")
+        for pri, grp in result.groupby("_PRI"):
+            sample = grp["DESCRIPTION"].iloc[0].split("<-")[0].strip()
+            print(f"    优先级{pri}: {len(grp):4d} 条  [{sample[:60]}]")
 
     result = result[result["IMAGEUID"].notna() & (result["IMAGEUID"] > 0)]
     return result
@@ -288,16 +307,19 @@ def generate_pet_download_list(rda_dir: str, mri_list: str, output_path: str):
     if "VISCODE" in df.columns:
         df = df[df["VISCODE"].isin(target)].copy()
 
-    # 去重：同一 PTID+VISCODE 只保留一条（最小 IMAGEUID）
+    # 去重：同一 PTID+VISCODE 按描述优先级选最优一条
     key = [c for c in ["PTID", "RID", "VISCODE"] if c in df.columns]
     if key:
         n = len(df)
-        df = (df.sort_values(key + ["IMAGEUID"])
+        sort_cols = key + (["_PRI", "IMAGEUID"] if "_PRI" in df.columns else ["IMAGEUID"])
+        df = (df.sort_values(sort_cols)
                 .drop_duplicates(subset=[c for c in key if c != "IMAGEUID"],
                                  keep="first")
                 .reset_index(drop=True))
+        if "_PRI" in df.columns:
+            df = df.drop(columns=["_PRI"])
         if len(df) < n:
-            print(f"  去重: {n} → {len(df)}")
+            print(f"  去重（按描述优先级）: {n} → {len(df)}")
 
     if df.empty:
         print("[失败] 过滤后无数据")
