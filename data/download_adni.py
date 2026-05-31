@@ -118,13 +118,17 @@ def parse_adni_image_collection_csv(csv_path: str) -> pd.DataFrame:
 
     # 标准化列名（ADNI 不同时期CSV格式略有差异）
     col_map = {
-        "Subject": "PTID",
-        "subject": "PTID",
-        "Visit": "VISIT",
-        "visit": "VISIT",
-        "Modality": "MODALITY",
-        "Image Data ID": "IMAGE_ID",
-        "image_data_id": "IMAGE_ID",
+        "Subject":        "PTID",
+        "Subject ID":     "PTID",
+        "subject":        "PTID",
+        "subject id":     "PTID",
+        "Visit":          "VISIT",
+        "visit":          "VISIT",
+        "Modality":       "MODALITY",
+        "Image Data ID":  "IMAGE_ID",
+        "Image ID":       "IMAGE_ID",
+        "image_data_id":  "IMAGE_ID",
+        "image id":       "IMAGE_ID",
     }
     df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
     return df
