@@ -310,7 +310,8 @@ def preprocess_all(mri_raw_dir: str   = Config.MRI_RAW_DIR,
                    pet_out_dir: str   = Config.PET_PREP_DIR,
                    transform_type: str = "SyN",
                    pet_use_mri_ref: bool = False,
-                   apply_n4: bool = False) -> None:
+                   apply_n4: bool = False,
+                   delete_source: bool = False) -> None:
     """
     批量预处理所有 MRI 和 PET 图像。
 
@@ -347,6 +348,8 @@ def preprocess_all(mri_raw_dir: str   = Config.MRI_RAW_DIR,
                                       transform_type, apply_n4=apply_n4)
         if ok:
             mri_ok += 1
+            if delete_source and os.path.exists(mri_path):
+                os.remove(mri_path)
         else:
             mri_fail += 1
 
@@ -381,6 +384,8 @@ def preprocess_all(mri_raw_dir: str   = Config.MRI_RAW_DIR,
 
         if ok:
             pet_ok += 1
+            if delete_source and os.path.exists(pet_path):
+                os.remove(pet_path)
         else:
             pet_fail += 1
 
@@ -508,8 +513,14 @@ if __name__ == "__main__":
     # ── 子命令 2: preprocess（预处理）───────────────────────────────────────
     p_pre = subparsers.add_parser("preprocess",
         help="对 mri_raw/ 中的 NIfTI 文件做配准/裁剪/归一化")
-    p_pre.add_argument("--mri_dir",  default=Config.MRI_RAW_DIR)
-    p_pre.add_argument("--pet_dir",  default=Config.PET_RAW_DIR)
+    p_pre.add_argument("--mri_dir",     default=Config.MRI_RAW_DIR,
+                       help="原始 MRI NIfTI 目录")
+    p_pre.add_argument("--pet_dir",     default=Config.PET_RAW_DIR,
+                       help="原始 PET NIfTI 目录")
+    p_pre.add_argument("--mri_out_dir", default=Config.MRI_PREP_DIR,
+                       help="MRI .npy 输出目录（默认 data/mri_preprocessed）")
+    p_pre.add_argument("--pet_out_dir", default=Config.PET_PREP_DIR,
+                       help="PET .npy 输出目录（默认 data/pet_preprocessed）")
     p_pre.add_argument("--transform", default="SyN",
                        choices=["SyN", "Affine"],
                        help="SyN=精度高/慢，Affine=速度快/精度略低")
@@ -517,6 +528,8 @@ if __name__ == "__main__":
                        help="PET 先对齐到 MRI 再到 MNI（未 co-reg PET 用此选项）")
     p_pre.add_argument("--n4", action="store_true",
                        help="对 MRI 做 N4 偏场校正（原始 MPRAGE 使用，N3-Scaled 无需）")
+    p_pre.add_argument("--delete_source", action="store_true",
+                       help="每张图预处理成功后删除原始 NIfTI（节省磁盘，适合存储紧张时）")
 
     args = parser.parse_args()
 
@@ -531,9 +544,12 @@ if __name__ == "__main__":
         preprocess_all(
             mri_raw_dir=args.mri_dir,
             pet_raw_dir=args.pet_dir,
+            mri_out_dir=args.mri_out_dir,
+            pet_out_dir=args.pet_out_dir,
             transform_type=args.transform,
             pet_use_mri_ref=args.pet_mri_ref,
             apply_n4=args.n4,
+            delete_source=args.delete_source,
         )
     else:
         parser.print_help()
