@@ -114,7 +114,7 @@ def main():
             print(f"\n  找到 MRI={mri_count} 个，PET={pet_count} 个原始图像")
             ret = run(
                 f"python {os.path.join('data', 'preprocess_imaging.py')} "
-                f"--transform {args.transform}",
+                f"preprocess --transform {args.transform}",
                 "步骤 2/3：图像配准与预处理"
             )
             if ret != 0:

@@ -308,23 +308,23 @@ python data/preprocess_tabular.py
 
 ```bash
 # 线性配准（速度快，先验证流程）
-python data/preprocess_imaging.py --transform Affine
+python data/preprocess_imaging.py preprocess --transform Affine
 
 # 非线性配准（精度高，与论文 SPM12 最接近，正式实验用）
-python data/preprocess_imaging.py --transform SyN
+python data/preprocess_imaging.py preprocess --transform SyN
 ```
 
 ### 9-B  下载的是原始 MPRAGE（无 N3 标记）
 
 ```bash
 # 需要加 --n4 做偏场校正
-python data/preprocess_imaging.py --transform SyN --n4
+python data/preprocess_imaging.py preprocess --transform SyN --n4
 ```
 
 ### 9-C  PET 未 co-registered（非推荐版本）
 
 ```bash
-python data/preprocess_imaging.py --transform SyN --pet_mri_ref
+python data/preprocess_imaging.py preprocess --transform SyN --pet_mri_ref
 ```
 
 **处理步骤**：
