@@ -115,9 +115,10 @@ class LMDPNet(nn.Module):
             mask_dim   = Config.MASK_DIM,            # 15
         )
 
-        # 预测头（论文 eq.25, eq.26）
-        self.pred_dx  = nn.Linear(hidden_dim, num_classes)      # 诊断
-        self.pred_bio = nn.Linear(hidden_dim, biomarker_dim)    # 生物标志物
+        # 预测头（论文 eq.25, eq.26）+ dropout 防止过拟合
+        self.dropout  = nn.Dropout(p=Config.DROPOUT)
+        self.pred_dx  = nn.Linear(hidden_dim, num_classes)
+        self.pred_bio = nn.Linear(hidden_dim, biomarker_dim)
 
     # ── 辅助：从批次中提取某时间步的图像 ──────────────────────────────────────
     @staticmethod
@@ -199,8 +200,9 @@ class LMDPNet(nn.Module):
 
         # ── 预测头：预测下一时间步（论文 eq.25, eq.26）──────────────────────
         # 从第 t 步的隐藏态预测第 t+1 步的诊断和生物标志物
-        dx_logits_seq  = self.pred_dx(hidden_seq)    # (B, T, num_classes)
-        bio_pred_seq   = self.pred_bio(hidden_seq)   # (B, T, biomarker_dim)
+        h_drop         = self.dropout(hidden_seq)
+        dx_logits_seq  = self.pred_dx(h_drop)        # (B, T, num_classes)
+        bio_pred_seq   = self.pred_bio(h_drop)       # (B, T, biomarker_dim)
 
         if not is_training:
             return {
@@ -250,33 +252,38 @@ class LMDPNet(nn.Module):
             "contrib_prior": avg_c_prior,
         }
 
-    # ── 诊断预测损失 ─────────────────────────────────────────────────────────
+    # ── 诊断预测损失（多步）────────────────────────────────────────────────
     def _compute_lp(self,
                     logits: torch.Tensor,   # (B, T, num_classes)
                     labels: torch.Tensor,   # (B, T)  int
                     lengths: torch.Tensor   # (B,)
     ) -> torch.Tensor:
         """
-        论文 eq.28：从第 2 个时间步开始，对所有预测诊断计算交叉熵损失。
-        用 h_t 预测第 t+1 步诊断 → logits[:, t, :] 对应标签 labels[:, t+1]。
+        多步预测损失：用 h_t 预测序列内所有后续时间步 t+k（k=1,…,L-t-1）的诊断。
+        这给出比单步更丰富的监督信号（最多 T*(T-1)/2 对），
+        符合纵向预测任务的目标。
         """
         B, T, C = logits.shape
         losses = []
 
         for b in range(B):
             L = int(lengths[b].item())
-            for t in range(min(L - 1, T - 1)):
-                label = labels[b, t + 1].item()
-                if label < 0:
-                    continue
-                losses.append(F.cross_entropy(
-                    logits[b, t].unsqueeze(0),
-                    torch.tensor([label], device=logits.device, dtype=torch.long)
-                ))
+            for t in range(min(L - 1, T - 1)):         # 每个隐藏状态 h_t
+                for k in range(1, L - t):               # 预测所有后续步
+                    target_t = t + k
+                    if target_t >= T:
+                        break
+                    label = labels[b, target_t].item()
+                    if label < 0:
+                        continue
+                    losses.append(F.cross_entropy(
+                        logits[b, t].unsqueeze(0),
+                        torch.tensor([label], device=logits.device, dtype=torch.long)
+                    ))
 
         if losses:
             return torch.stack(losses).mean()
-        return logits.sum() * 0.0  # 全被掩码时返回可微分的零
+        return logits.sum() * 0.0
 
     # ── 插补损失 ──────────────────────────────────────────────────────────────
     def _compute_li(self,

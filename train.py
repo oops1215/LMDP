@@ -277,7 +277,9 @@ def train_fold(fold_idx:    int,
         biomarker_dim = Config.BIOMARKER_DIM,
     ).to(device)
 
-    optimizer = optim.Adam(model.parameters(), lr=Config.LEARNING_RATE)
+    optimizer = optim.Adam(model.parameters(),
+                           lr=Config.LEARNING_RATE,
+                           weight_decay=Config.WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
 
     best_val_loss     = float("inf")

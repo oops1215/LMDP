@@ -73,5 +73,8 @@ class Config:
     # causing posterior collapse. β=0.001 rebalances so reconstruction dominates.
     KL_WEIGHT     = 0.001
 
+    WEIGHT_DECAY  = 1e-4   # L2 regularization in Adam
+    DROPOUT       = 0.3    # dropout before prediction heads
+
     # ─── Hardware ─────────────────────────────────────────────────────────────
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
