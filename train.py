@@ -385,8 +385,11 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--device",      type=str,
                         default=Config.DEVICE)
+    parser.add_argument("--kl_weight",   type=float, default=Config.KL_WEIGHT,
+                        help="β-VAE KL 权重（论文推荐范围 0.001–0.1）")
     args = parser.parse_args()
     args.load_images = not args.no_images
+    Config.KL_WEIGHT = args.kl_weight
 
     torch.manual_seed(Config.SEED)
     np.random.seed(Config.SEED)

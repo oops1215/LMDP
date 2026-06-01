@@ -258,28 +258,20 @@ class LMDPNet(nn.Module):
                     labels: torch.Tensor,   # (B, T)  int
                     lengths: torch.Tensor   # (B,)
     ) -> torch.Tensor:
-        """
-        多步预测损失：用 h_t 预测序列内所有后续时间步 t+k（k=1,…,L-t-1）的诊断。
-        这给出比单步更丰富的监督信号（最多 T*(T-1)/2 对），
-        符合纵向预测任务的目标。
-        """
+        """论文 eq.28：用 h_t 预测下一步 t+1 的诊断（单步）。"""
         B, T, C = logits.shape
         losses = []
 
         for b in range(B):
             L = int(lengths[b].item())
-            for t in range(min(L - 1, T - 1)):         # 每个隐藏状态 h_t
-                for k in range(1, L - t):               # 预测所有后续步
-                    target_t = t + k
-                    if target_t >= T:
-                        break
-                    label = labels[b, target_t].item()
-                    if label < 0:
-                        continue
-                    losses.append(F.cross_entropy(
-                        logits[b, t].unsqueeze(0),
-                        torch.tensor([label], device=logits.device, dtype=torch.long)
-                    ))
+            for t in range(min(L - 1, T - 1)):   # h_t → label[t+1]
+                label = labels[b, t + 1].item()
+                if label < 0:
+                    continue
+                losses.append(F.cross_entropy(
+                    logits[b, t].unsqueeze(0),
+                    torch.tensor([label], device=logits.device, dtype=torch.long)
+                ))
 
         if losses:
             return torch.stack(losses).mean()
