@@ -260,24 +260,24 @@ class M3VAE(nn.Module):
             fused_mu, fused_logvar = product_of_experts(mu_list, logvar_list, mask)
             z = self.reparameterize(fused_mu, fused_logvar)
 
-            # 重建
-            recon_mri = self.mri_decoder(z)  # (B, 1, 128, 160, 128)
-            recon_pet = self.pet_decoder(z)
-
-            # 重建损失：始终通过解码器计算以保证 grad_fn
+            # 重建损失（仅对实际有图像的样本计算，避免无谓的解码器前向传播）
             recon_losses = []
             if mri_avail.any() and mri is not None:
                 idx_m = mri_avail.nonzero(as_tuple=False).squeeze(1)
-                recon_losses.append(F.mse_loss(recon_mri[idx_m], mri[idx_m]))
+                recon_mri = self.mri_decoder(z[idx_m])
+                recon_losses.append(F.mse_loss(recon_mri, mri[idx_m]))
+                del recon_mri
             if pet_avail.any() and pet is not None:
                 idx_p = pet_avail.nonzero(as_tuple=False).squeeze(1)
-                recon_losses.append(F.mse_loss(recon_pet[idx_p], pet[idx_p]))
+                recon_pet = self.pet_decoder(z[idx_p])
+                recon_losses.append(F.mse_loss(recon_pet, pet[idx_p]))
+                del recon_pet
 
-            # 无可用图像时用解码器输出自身产生可微分的零
             if recon_losses:
                 recon_loss = torch.stack(recon_losses).mean()
             else:
-                recon_loss = (recon_mri.sum() + recon_pet.sum()) * 0.0
+                # 无图像时用解码器权重产生可微分零（无需前向传播大张量）
+                recon_loss = next(self.mri_decoder.parameters()).sum() * 0.0
 
             # KL 损失（仅对 combo_avail 的样本）
             kl_loss = self.kl_divergence(
