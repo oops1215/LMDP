@@ -219,6 +219,29 @@ class M3VAE(nn.Module):
         """KL(N(μ,σ) || N(0,I)) = 0.5 * Σ(μ² + σ² - logσ² - 1)"""
         return 0.5 * torch.sum(mu.pow(2) + logvar.exp() - logvar - 1, dim=-1)
 
+    # ── 模态贡献率（基于 PoE 精度权重，仅用于日志）────────────────────────
+    @staticmethod
+    def compute_modality_contributions(
+        mri_avail: torch.Tensor,
+        pet_avail: torch.Tensor,
+        mri_logvar: torch.Tensor,
+        pet_logvar: torch.Tensor,
+    ) -> Tuple[float, float, float]:
+        """
+        返回 (contrib_mri, contrib_pet, contrib_prior)，三者之和约为 1。
+        计算方式：T_c = exp(-logvar_c)，贡献率 = T_c * avail / T_total。
+        先验精度固定为 1（标准正态）。
+        不参与梯度计算。
+        """
+        T_mri   = torch.exp(-mri_logvar) * mri_avail.float().unsqueeze(1)  # (B, D)
+        T_pet   = torch.exp(-pet_logvar) * pet_avail.float().unsqueeze(1)  # (B, D)
+        T_total = 1.0 + T_mri + T_pet                                      # (B, D)
+
+        c_mri   = (T_mri   / T_total).mean().detach().item()
+        c_pet   = (T_pet   / T_total).mean().detach().item()
+        c_prior = (1.0     / T_total).mean().detach().item()
+        return c_mri, c_pet, c_prior
+
     # ── VAE 损失（论文 eq.29）────────────────────────────────────────────────
     def vae_loss(self,
                   mri: Optional[torch.Tensor],
@@ -324,12 +347,13 @@ class M3VAE(nn.Module):
                 mri: Optional[torch.Tensor],
                 pet: Optional[torch.Tensor],
                 mri_avail: torch.Tensor,
-                pet_avail: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                pet_avail: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Tuple[float, float, float]]:
         """
         训练时使用。
-        返回 (fused_mu, vae_loss)
+        返回 (fused_mu, vae_loss, (contrib_mri, contrib_pet, contrib_prior))
         fused_mu : (B, latent_dim) 用于下游 LSTM
         vae_loss : 标量
+        contrib  : 三个 float，各模态精度加权贡献率（仅供日志）
         """
         mri_mu, mri_logvar = self._encode_modality(mri, self.mri_encoder, mri_avail)
         pet_mu, pet_logvar = self._encode_modality(pet, self.pet_encoder, pet_avail)
@@ -344,4 +368,7 @@ class M3VAE(nn.Module):
         fused_mu, _ = product_of_experts(
             [mri_mu, pet_mu], [mri_logvar, pet_logvar], mask)
 
-        return fused_mu, loss
+        contribs = self.compute_modality_contributions(
+            mri_avail, pet_avail, mri_logvar, pet_logvar)
+
+        return fused_mu, loss, contribs

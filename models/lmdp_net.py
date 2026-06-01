@@ -145,6 +145,7 @@ class LMDPNet(nn.Module):
         # 存储每步输出
         all_x_pred    = []    # (T,) each (B, non_img_dim) — 用于插补损失
         vae_losses    = []
+        all_contribs  = []    # [(c_mri, c_pet, c_prior), ...]  模态贡献率日志
 
         h = torch.zeros(B, self.hidden_dim, device=device)
         c = torch.zeros(B, self.hidden_dim, device=device)
@@ -158,8 +159,9 @@ class LMDPNet(nn.Module):
 
             # ── M3VAE ──────────────────────────────────────────────────────
             if is_training:
-                fused_mu, vae_loss = self.m3vae(mri_t, pet_t, mri_av, pet_av)
+                fused_mu, vae_loss, contribs = self.m3vae(mri_t, pet_t, mri_av, pet_av)
                 vae_losses.append(vae_loss)
+                all_contribs.append(contribs)
             else:
                 fused_mu = self.m3vae.get_fused_mu(mri_t, pet_t, mri_av, pet_av)
 
@@ -217,13 +219,26 @@ class LMDPNet(nn.Module):
         # L_total = L_p + L_i + L_f（论文 eq.27，等权重）
         total = lp + li + lf
 
+        # 各模态平均贡献率（跨时间步平均）
+        if all_contribs:
+            n = len(all_contribs)
+            avg_c_mri   = sum(c[0] for c in all_contribs) / n
+            avg_c_pet   = sum(c[1] for c in all_contribs) / n
+            avg_c_prior = sum(c[2] for c in all_contribs) / n
+        else:
+            avg_c_mri = avg_c_pet = 0.0
+            avg_c_prior = 1.0
+
         return {
-            "total_loss": total,
-            "lp"        : lp.item(),
-            "li"        : li.item(),
-            "lf"        : lf.item(),
-            "dx_preds"  : dx_logits_seq,
-            "bio_preds" : bio_pred_seq,
+            "total_loss"   : total,
+            "lp"           : lp.item(),
+            "li"           : li.item(),
+            "lf"           : lf.item(),
+            "dx_preds"     : dx_logits_seq,
+            "bio_preds"    : bio_pred_seq,
+            "contrib_mri"  : avg_c_mri,
+            "contrib_pet"  : avg_c_pet,
+            "contrib_prior": avg_c_prior,
         }
 
     # ── 诊断预测损失 ─────────────────────────────────────────────────────────

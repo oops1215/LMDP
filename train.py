@@ -46,6 +46,7 @@ def train_epoch(model: LMDPNet,
                 load_images: bool = True) -> Dict:
     model.train()
     total_loss = lp_sum = li_sum = lf_sum = 0.0
+    c_mri_sum = c_pet_sum = c_prior_sum = 0.0
     n_batches = 0
 
     for batch in tqdm(loader, desc="  Train", leave=False):
@@ -65,14 +66,20 @@ def train_epoch(model: LMDPNet,
         lp_sum     += out["lp"]
         li_sum     += out["li"]
         lf_sum     += out["lf"]
+        c_mri_sum  += out.get("contrib_mri",   0.0)
+        c_pet_sum  += out.get("contrib_pet",   0.0)
+        c_prior_sum += out.get("contrib_prior", 1.0)
         n_batches  += 1
 
     nb = max(n_batches, 1)
     return {
-        "loss": total_loss / nb,
-        "lp"  : lp_sum / nb,
-        "li"  : li_sum / nb,
-        "lf"  : lf_sum / nb,
+        "loss"         : total_loss / nb,
+        "lp"           : lp_sum / nb,
+        "li"           : li_sum / nb,
+        "lf"           : lf_sum / nb,
+        "contrib_mri"  : c_mri_sum / nb,
+        "contrib_pet"  : c_pet_sum / nb,
+        "contrib_prior": c_prior_sum / nb,
     }
 
 
@@ -129,8 +136,11 @@ def train_fold(fold_idx:    int,
         elapsed = time.time() - t0
 
         print(f"  Epoch {epoch:3d}/{Config.NUM_EPOCHS} "
-              f"| train_loss={train_log['loss']:.4f} "
+              f"| loss={train_log['loss']:.4f} "
               f"(lp={train_log['lp']:.4f} li={train_log['li']:.4f} lf={train_log['lf']:.4f}) "
+              f"| contrib MRI={train_log['contrib_mri']:.1%} "
+              f"PET={train_log['contrib_pet']:.1%} "
+              f"prior={train_log['contrib_prior']:.1%} "
               f"| val_acc={val_metrics.get('acc', 0):.4f} "
               f"mAUC={val_metrics.get('mauc', 0):.4f} "
               f"| {elapsed:.1f}s")
