@@ -258,10 +258,9 @@ class M3VAE(nn.Module):
         """
         B = mri_avail.shape[0]
         combo_losses = []
-        n_valid_combos = 0
+        recon_items  = []   # for logging only
+        kl_items     = []   # raw KL before β weighting, for logging only
 
-        # 论文训练时对所有受试者的所有子集都计算损失
-        # 对应论文: "we will extract z(fused,01), z(fused,10), z(fused,11)"
         combos = [
             (torch.ones(B, dtype=torch.float32, device=mri_avail.device),
              torch.zeros(B, dtype=torch.float32, device=mri_avail.device)),   # {MRI}
@@ -271,19 +270,15 @@ class M3VAE(nn.Module):
         ]
 
         for mask_mri, mask_pet in combos:
-            # 只对实际有该模态数据的样本有意义
             combo_avail = (mask_mri + mask_pet).clamp(max=1).bool()
             if not combo_avail.any():
                 continue
 
-            mask = torch.stack([mask_mri, mask_pet], dim=1)  # (B, 2)
-            mu_list     = [mri_mu,     pet_mu    ]
-            logvar_list = [mri_logvar, pet_logvar]
-
-            fused_mu, fused_logvar = product_of_experts(mu_list, logvar_list, mask)
+            mask = torch.stack([mask_mri, mask_pet], dim=1)
+            fused_mu, fused_logvar = product_of_experts(
+                [mri_mu, pet_mu], [mri_logvar, pet_logvar], mask)
             z = self.reparameterize(fused_mu, fused_logvar)
 
-            # 重建损失（仅对实际有图像的样本计算，避免无谓的解码器前向传播）
             recon_losses = []
             if mri_avail.any() and mri is not None:
                 idx_m = mri_avail.nonzero(as_tuple=False).squeeze(1)
@@ -299,20 +294,22 @@ class M3VAE(nn.Module):
             if recon_losses:
                 recon_loss = torch.stack(recon_losses).mean()
             else:
-                # 无图像时用解码器权重产生可微分零（无需前向传播大张量）
                 recon_loss = next(self.mri_decoder.parameters()).sum() * 0.0
 
-            # KL 损失（仅对 combo_avail 的样本）
             kl_loss = self.kl_divergence(
                 fused_mu[combo_avail], fused_logvar[combo_avail]
             ).mean()
 
-            combo_losses.append(recon_loss + kl_loss)
-            n_valid_combos += 1
+            combo_losses.append(recon_loss + Config.KL_WEIGHT * kl_loss)
+            recon_items.append(recon_loss.detach().item())
+            kl_items.append(kl_loss.detach().item())
+
+        avg_recon = sum(recon_items) / len(recon_items) if recon_items else 0.0
+        avg_kl    = sum(kl_items)    / len(kl_items)    if kl_items    else 0.0
 
         if combo_losses:
-            return torch.stack(combo_losses).mean()
-        return (mri_mu.sum() + pet_mu.sum()) * 0.0  # 极端情况下的可微分零
+            return torch.stack(combo_losses).mean(), avg_recon, avg_kl
+        return (mri_mu.sum() + pet_mu.sum()) * 0.0, 0.0, 0.0
 
     # ── 获取推理用融合均值（论文 eq.10）──────────────────────────────────────
     @torch.no_grad()
@@ -347,23 +344,22 @@ class M3VAE(nn.Module):
                 mri: Optional[torch.Tensor],
                 pet: Optional[torch.Tensor],
                 mri_avail: torch.Tensor,
-                pet_avail: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Tuple[float, float, float]]:
+                pet_avail: torch.Tensor):
         """
         训练时使用。
-        返回 (fused_mu, vae_loss, (contrib_mri, contrib_pet, contrib_prior))
-        fused_mu : (B, latent_dim) 用于下游 LSTM
-        vae_loss : 标量
-        contrib  : 三个 float，各模态精度加权贡献率（仅供日志）
+        返回 (fused_mu, vae_loss, contribs, avg_recon, avg_kl)
+          fused_mu  : (B, latent_dim)
+          vae_loss  : 标量（recon + β·KL）
+          contribs  : (c_mri, c_pet, c_prior) 贡献率日志
+          avg_recon : float  平均重建损失（监控用）
+          avg_kl    : float  平均原始 KL（监控用，未乘 β）
         """
         mri_mu, mri_logvar = self._encode_modality(mri, self.mri_encoder, mri_avail)
         pet_mu, pet_logvar = self._encode_modality(pet, self.pet_encoder, pet_avail)
 
-        loss = self.vae_loss(mri, pet,
-                              mri_mu, mri_logvar,
-                              pet_mu, pet_logvar,
-                              mri_avail, pet_avail)
+        loss, avg_recon, avg_kl = self.vae_loss(
+            mri, pet, mri_mu, mri_logvar, pet_mu, pet_logvar, mri_avail, pet_avail)
 
-        # 用实际可用模态计算融合均值
         mask = torch.stack([mri_avail.float(), pet_avail.float()], dim=1)
         fused_mu, _ = product_of_experts(
             [mri_mu, pet_mu], [mri_logvar, pet_logvar], mask)
@@ -371,4 +367,4 @@ class M3VAE(nn.Module):
         contribs = self.compute_modality_contributions(
             mri_avail, pet_avail, mri_logvar, pet_logvar)
 
-        return fused_mu, loss, contribs
+        return fused_mu, loss, contribs, avg_recon, avg_kl

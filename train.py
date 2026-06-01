@@ -57,6 +57,7 @@ def train_epoch(model: LMDPNet,
                 load_images: bool = True) -> Dict:
     model.train()
     total_loss = lp_sum = li_sum = lf_sum = 0.0
+    recon_sum = kl_sum = 0.0
     c_mri_sum = c_pet_sum = c_prior_sum = 0.0
     n_batches = 0
 
@@ -69,18 +70,19 @@ def train_epoch(model: LMDPNet,
         loss = out["total_loss"]
         loss.backward()
 
-        # 梯度裁剪（防止梯度爆炸）
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
 
-        total_loss += loss.item()
-        lp_sum     += out["lp"]
-        li_sum     += out["li"]
-        lf_sum     += out["lf"]
-        c_mri_sum  += out.get("contrib_mri",   0.0)
-        c_pet_sum  += out.get("contrib_pet",   0.0)
+        total_loss  += loss.item()
+        lp_sum      += out["lp"]
+        li_sum      += out["li"]
+        lf_sum      += out["lf"]
+        recon_sum   += out.get("lf_recon",     0.0)
+        kl_sum      += out.get("lf_kl",        0.0)
+        c_mri_sum   += out.get("contrib_mri",  0.0)
+        c_pet_sum   += out.get("contrib_pet",  0.0)
         c_prior_sum += out.get("contrib_prior", 1.0)
-        n_batches  += 1
+        n_batches   += 1
 
     nb = max(n_batches, 1)
     return {
@@ -88,6 +90,8 @@ def train_epoch(model: LMDPNet,
         "lp"           : lp_sum / nb,
         "li"           : li_sum / nb,
         "lf"           : lf_sum / nb,
+        "lf_recon"     : recon_sum / nb,
+        "lf_kl"        : kl_sum / nb,
         "contrib_mri"  : c_mri_sum / nb,
         "contrib_pet"  : c_pet_sum / nb,
         "contrib_prior": c_prior_sum / nb,
@@ -320,8 +324,11 @@ def train_fold(fold_idx:    int,
 
         print(f"  Epoch {epoch:3d}/{Config.NUM_EPOCHS} "
               f"| loss={train_log['loss']:.4f} "
-              f"(lp={train_log['lp']:.4f} li={train_log['li']:.4f} lf={train_log['lf']:.4f}) "
-              f"| contrib MRI={train_log['contrib_mri']:.1%} "
+              f"lp={train_log['lp']:.4f} "
+              f"li={train_log['li']:.4f} "
+              f"lf={train_log['lf']:.4f}"
+              f"(rec={train_log['lf_recon']:.4f} kl={train_log['lf_kl']:.2f}) "
+              f"| MRI={train_log['contrib_mri']:.1%} "
               f"PET={train_log['contrib_pet']:.1%} "
               f"prior={train_log['contrib_prior']:.1%} "
               f"| val_acc={val_metrics.get('acc', 0):.4f} "

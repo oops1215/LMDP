@@ -68,5 +68,10 @@ class Config:
     MAX_SEQ_LEN   = 6   # max 6 visits (M0–M60)
     DX_MASK_PROB  = 0.5  # probability of masking current-visit diagnosis during training
 
+    # KL weight in VAE loss (β-VAE).
+    # At init, KL term (~24.7) is ~500x larger than recon (~0.05),
+    # causing posterior collapse. β=0.001 rebalances so reconstruction dominates.
+    KL_WEIGHT     = 0.001
+
     # ─── Hardware ─────────────────────────────────────────────────────────────
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

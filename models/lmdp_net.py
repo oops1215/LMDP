@@ -142,10 +142,11 @@ class LMDPNet(nn.Module):
         dx_seq       = batch["dx_seq"]             # (B,T)  int
         lengths      = batch["lengths"]            # (B,)   int
 
-        # 存储每步输出
-        all_x_pred    = []    # (T,) each (B, non_img_dim) — 用于插补损失
+        all_x_pred    = []
         vae_losses    = []
-        all_contribs  = []    # [(c_mri, c_pet, c_prior), ...]  模态贡献率日志
+        all_contribs  = []
+        recon_logs    = []    # avg recon per step (logging)
+        kl_logs       = []    # avg raw KL per step (logging)
 
         h = torch.zeros(B, self.hidden_dim, device=device)
         c = torch.zeros(B, self.hidden_dim, device=device)
@@ -159,9 +160,12 @@ class LMDPNet(nn.Module):
 
             # ── M3VAE ──────────────────────────────────────────────────────
             if is_training:
-                fused_mu, vae_loss, contribs = self.m3vae(mri_t, pet_t, mri_av, pet_av)
+                fused_mu, vae_loss, contribs, recon, kl = self.m3vae(
+                    mri_t, pet_t, mri_av, pet_av)
                 vae_losses.append(vae_loss)
                 all_contribs.append(contribs)
+                recon_logs.append(recon)
+                kl_logs.append(kl)
             else:
                 fused_mu = self.m3vae.get_fused_mu(mri_t, pet_t, mri_av, pet_av)
 
@@ -229,11 +233,16 @@ class LMDPNet(nn.Module):
             avg_c_mri = avg_c_pet = 0.0
             avg_c_prior = 1.0
 
+        avg_recon = sum(recon_logs) / len(recon_logs) if recon_logs else 0.0
+        avg_kl    = sum(kl_logs)    / len(kl_logs)    if kl_logs    else 0.0
+
         return {
             "total_loss"   : total,
             "lp"           : lp.item(),
             "li"           : li.item(),
             "lf"           : lf.item(),
+            "lf_recon"     : avg_recon,      # 重建损失（期望下降）
+            "lf_kl"        : avg_kl,         # 原始 KL（未乘 β，供监控）
             "dx_preds"     : dx_logits_seq,
             "bio_preds"    : bio_pred_seq,
             "contrib_mri"  : avg_c_mri,
