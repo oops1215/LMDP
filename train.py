@@ -275,6 +275,7 @@ def train_fold(fold_idx:    int,
         load_images = args.load_images,
         num_workers = args.num_workers,
         seed        = Config.SEED,
+        filter_no_image = args.filter_no_image,
     )
 
     # latent_dim 始终保持 Config.LATENT_DIM；
@@ -387,6 +388,8 @@ def main():
                         default=Config.DEVICE)
     parser.add_argument("--kl_weight",   type=float, default=Config.KL_WEIGHT,
                         help="β-VAE KL 权重（论文推荐范围 0.001–0.1）")
+    parser.add_argument("--filter_no_image", action="store_true",
+                        help="过滤掉所有访次均无图像的受试者")
     args = parser.parse_args()
     args.load_images = not args.no_images
     Config.KL_WEIGHT = args.kl_weight

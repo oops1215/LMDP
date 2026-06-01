@@ -211,7 +211,8 @@ def build_dataloaders(processed_data_path: str = Config.TAB_PROCESSED_PATH,
                       batch_size: int = Config.BATCH_SIZE,
                       load_images: bool = True,
                       num_workers: int = 4,
-                      seed: int = Config.SEED) -> Tuple[DataLoader, DataLoader]:
+                      seed: int = Config.SEED,
+                      filter_no_image: bool = False) -> Tuple[DataLoader, DataLoader]:
     """
     构建 K-fold 的 train/val DataLoader。
 
@@ -232,6 +233,12 @@ def build_dataloaders(processed_data_path: str = Config.TAB_PROCESSED_PATH,
     edu_scaler   = packed["edu_scaler"]
 
     all_ptids = sorted(subject_data.keys())
+    if filter_no_image:
+        before = len(all_ptids)
+        all_ptids = [p for p in all_ptids
+                     if any(v.get("mri_path") is not None or v.get("pet_path") is not None
+                            for v in subject_data[p]["visits"])]
+        print(f"filter_no_image: {before} → {len(all_ptids)} 受试者（删除 {before - len(all_ptids)} 个全无图像受试者）")
     np.random.shuffle(all_ptids)
 
     # 5-fold split
