@@ -255,10 +255,10 @@ def build_dataloaders(processed_data_path: str = Config.TAB_PROCESSED_PATH,
 
     train_loader = DataLoader(train_ds, batch_size=batch_size,
                                shuffle=True, collate_fn=collate_fn,
-                               num_workers=num_workers, pin_memory=True)
+                               num_workers=num_workers, pin_memory=False)
     val_loader   = DataLoader(val_ds, batch_size=batch_size,
                                shuffle=False, collate_fn=collate_fn,
-                               num_workers=num_workers, pin_memory=True)
+                               num_workers=num_workers, pin_memory=False)
 
     print(f"Fold {fold_idx}: train={len(train_ptids)}, val={len(val_ptids)}")
     return train_loader, val_loader

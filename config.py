@@ -61,7 +61,7 @@ class Config:
 
     # ─── Training ─────────────────────────────────────────────────────────────
     LEARNING_RATE = 0.002
-    BATCH_SIZE    = 4
+    BATCH_SIZE    = 2     # 4→2：3D 图像批次占显存过大，RTX 2070(8GB) 需降低
     NUM_EPOCHS    = 100
     K_FOLDS       = 5
     SEED          = 42
