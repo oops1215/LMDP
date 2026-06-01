@@ -60,6 +60,7 @@ def train_epoch(model: LMDPNet,
     total_loss = lp_sum = li_sum = lf_sum = 0.0
     recon_sum = kl_sum = 0.0
     c_mri_sum = c_pet_sum = c_prior_sum = 0.0
+    c_mri_cond_sum = c_pet_cond_sum = 0.0
     n_batches = 0
 
     for batch in tqdm(loader, desc="  Train", leave=False):
@@ -68,7 +69,7 @@ def train_epoch(model: LMDPNet,
         optimizer.zero_grad()
 
         if scaler is not None:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 out = model(batch, is_training=True)
                 loss = out["total_loss"]
             scaler.scale(loss).backward()
@@ -83,28 +84,32 @@ def train_epoch(model: LMDPNet,
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
-        total_loss  += loss.item()
-        lp_sum      += out["lp"]
-        li_sum      += out["li"]
-        lf_sum      += out["lf"]
-        recon_sum   += out.get("lf_recon",     0.0)
-        kl_sum      += out.get("lf_kl",        0.0)
-        c_mri_sum   += out.get("contrib_mri",  0.0)
-        c_pet_sum   += out.get("contrib_pet",  0.0)
-        c_prior_sum += out.get("contrib_prior", 1.0)
-        n_batches   += 1
+        total_loss     += loss.item()
+        lp_sum         += out["lp"]
+        li_sum         += out["li"]
+        lf_sum         += out["lf"]
+        recon_sum      += out.get("lf_recon",         0.0)
+        kl_sum         += out.get("lf_kl",            0.0)
+        c_mri_sum      += out.get("contrib_mri",      0.0)
+        c_pet_sum      += out.get("contrib_pet",      0.0)
+        c_prior_sum    += out.get("contrib_prior",    1.0)
+        c_mri_cond_sum += out.get("contrib_mri_cond", 0.0)
+        c_pet_cond_sum += out.get("contrib_pet_cond", 0.0)
+        n_batches      += 1
 
     nb = max(n_batches, 1)
     return {
-        "loss"         : total_loss / nb,
-        "lp"           : lp_sum / nb,
-        "li"           : li_sum / nb,
-        "lf"           : lf_sum / nb,
-        "lf_recon"     : recon_sum / nb,
-        "lf_kl"        : kl_sum / nb,
-        "contrib_mri"  : c_mri_sum / nb,
-        "contrib_pet"  : c_pet_sum / nb,
-        "contrib_prior": c_prior_sum / nb,
+        "loss"             : total_loss / nb,
+        "lp"               : lp_sum / nb,
+        "li"               : li_sum / nb,
+        "lf"               : lf_sum / nb,
+        "lf_recon"         : recon_sum / nb,
+        "lf_kl"            : kl_sum / nb,
+        "contrib_mri"      : c_mri_sum / nb,
+        "contrib_pet"      : c_pet_sum / nb,
+        "contrib_prior"    : c_prior_sum / nb,
+        "contrib_mri_cond" : c_mri_cond_sum / nb,   # 有 MRI 时的编码器真实贡献
+        "contrib_pet_cond" : c_pet_cond_sum / nb,   # 有 PET 时的编码器真实贡献
     }
 
 
@@ -293,7 +298,7 @@ def train_fold(fold_idx:    int,
                            weight_decay=Config.WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
     # 混合精度：float16 激活值，显存减半（仅 CUDA 启用）
-    scaler = torch.cuda.amp.GradScaler() if device == "cuda" else None
+    scaler = torch.amp.GradScaler('cuda') if device == "cuda" else None
 
     best_val_loss     = float("inf")
     best_metrics      = {}
@@ -305,12 +310,17 @@ def train_fold(fold_idx:    int,
     ckpt_dir = os.path.join("checkpoints", f"fold{fold_idx}")
     os.makedirs(ckpt_dir, exist_ok=True)
 
+    # 保存初始值，fold 结束后恢复——避免多 fold 训练时 warmup 状态污染
+    _original_kl_weight = Config.KL_WEIGHT
+
     for epoch in range(1, Config.NUM_EPOCHS + 1):
         t0 = time.time()
 
-        # KL warmup：线性从 0 增长到目标 kl_weight
+        # KL warmup：线性从 0 增长到目标 kl_weight，仅修改本 fold 的临时值
         if args.kl_warmup_epochs > 0:
             Config.KL_WEIGHT = args.kl_weight * min(1.0, epoch / args.kl_warmup_epochs)
+        else:
+            Config.KL_WEIGHT = args.kl_weight
 
         train_log = train_epoch(model, train_loader, optimizer, device, args.load_images, scaler)
         val_metrics = evaluate_fold(model, val_loader, device, args.load_images)
@@ -341,14 +351,17 @@ def train_fold(fold_idx:    int,
                   f"no_PET={acc_no_pet:.3f}(Δ{acc_full-acc_no_pet:+.3f})  "
                   f"tab_only={acc_no_img:.3f}(Δ{acc_full-acc_no_img:+.3f})")
 
+        # 格式：MRI=17.8%(↑58%有图时) 表示整体均摊贡献 vs 有 MRI 时的真实编码器信息量
+        c_mri_cond = train_log.get("contrib_mri_cond", 0.0)
+        c_pet_cond = train_log.get("contrib_pet_cond", 0.0)
         print(f"  Epoch {epoch:3d}/{Config.NUM_EPOCHS} "
               f"| loss={train_log['loss']:.4f} "
               f"lp={train_log['lp']:.4f} "
               f"li={train_log['li']:.4f} "
               f"lf={train_log['lf']:.4f}"
               f"(rec={train_log['lf_recon']:.4f} kl={train_log['lf_kl']:.2f}) "
-              f"| MRI={train_log['contrib_mri']:.1%} "
-              f"PET={train_log['contrib_pet']:.1%} "
+              f"| MRI={train_log['contrib_mri']:.1%}(↑{c_mri_cond:.0%}) "
+              f"PET={train_log['contrib_pet']:.1%}(↑{c_pet_cond:.0%}) "
               f"prior={train_log['contrib_prior']:.1%} "
               f"| val_acc={val_metrics.get('acc', 0):.4f} "
               f"mAUC={val_metrics.get('mauc', 0):.4f} "
@@ -371,6 +384,9 @@ def train_fold(fold_idx:    int,
             if no_improve >= patience:
                 print(f"  [早停] {patience} 轮无改善")
                 break
+
+    # 恢复 Config.KL_WEIGHT，避免下一个 fold 的 warmup 起点被污染
+    Config.KL_WEIGHT = _original_kl_weight
 
     print(f"\n  Fold {fold_idx + 1} 最佳结果:")
     print_metrics(best_metrics)

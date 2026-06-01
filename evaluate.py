@@ -261,9 +261,14 @@ if __name__ == "__main__":
         load_images=load_images,
     )
 
+    # latent_dim 始终用 Config.LATENT_DIM：无图像时 M3VAE 自动返回零向量，
+    # 不能传 0——否则与训练时的 checkpoint 维度不匹配导致 load_state_dict 报错。
     model = LMDPNet(
-        latent_dim    = Config.LATENT_DIM if load_images else 0,
+        latent_dim    = Config.LATENT_DIM,
         hidden_dim    = Config.HIDDEN_DIM,
+        non_img_dim   = Config.NON_IMG_DIM,
+        num_classes   = Config.NUM_CLASSES,
+        biomarker_dim = Config.BIOMARKER_DIM,
     ).to(args.device)
 
     ckpt = torch.load(args.checkpoint, map_location=args.device)

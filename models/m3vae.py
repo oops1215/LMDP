@@ -226,11 +226,12 @@ class M3VAE(nn.Module):
         pet_avail: torch.Tensor,
         mri_logvar: torch.Tensor,
         pet_logvar: torch.Tensor,
-    ) -> Tuple[float, float, float]:
+    ) -> Tuple[float, float, float, float, float]:
         """
-        返回 (contrib_mri, contrib_pet, contrib_prior)，三者之和约为 1。
-        计算方式：T_c = exp(-logvar_c)，贡献率 = T_c * avail / T_total。
-        先验精度固定为 1（标准正态）。
+        返回 (c_mri, c_pet, c_prior, c_mri_cond, c_pet_cond)。
+        前三项：所有样本均摊（含无图像步骤），三者之和约为 1，用于堆叠面积图。
+        c_mri_cond：仅在 MRI 实际可用时计算的 MRI 贡献率（反映编码器信息量）。
+        c_pet_cond：仅在 PET 实际可用时计算的 PET 贡献率。
         不参与梯度计算。
         """
         T_mri   = torch.exp(-mri_logvar) * mri_avail.float().unsqueeze(1)  # (B, D)
@@ -240,7 +241,23 @@ class M3VAE(nn.Module):
         c_mri   = (T_mri   / T_total).mean().detach().item()
         c_pet   = (T_pet   / T_total).mean().detach().item()
         c_prior = (1.0     / T_total).mean().detach().item()
-        return c_mri, c_pet, c_prior
+
+        # 条件贡献率：有 MRI 的样本中 MRI 占多少精度权重
+        c_mri_cond = 0.0
+        if mri_avail.any():
+            T_m = torch.exp(-mri_logvar[mri_avail])
+            T_p = torch.exp(-pet_logvar[mri_avail]) * pet_avail[mri_avail].float().unsqueeze(1)
+            T_t = 1.0 + T_m + T_p
+            c_mri_cond = (T_m / T_t).mean().detach().item()
+
+        c_pet_cond = 0.0
+        if pet_avail.any():
+            T_p = torch.exp(-pet_logvar[pet_avail])
+            T_m = torch.exp(-mri_logvar[pet_avail]) * mri_avail[pet_avail].float().unsqueeze(1)
+            T_t = 1.0 + T_m + T_p
+            c_pet_cond = (T_p / T_t).mean().detach().item()
+
+        return c_mri, c_pet, c_prior, c_mri_cond, c_pet_cond
 
     # ── VAE 损失（论文 eq.29）────────────────────────────────────────────────
     def vae_loss(self,
@@ -252,35 +269,24 @@ class M3VAE(nn.Module):
                   pet_avail: torch.Tensor) -> torch.Tensor:
         """
         对所有 2^C-1=3 种模态子集组合计算 VAE 损失并求和（论文 eq.29）。
-        - 子集 {MRI}    : mask = [1, 0]
-        - 子集 {PET}    : mask = [0, 1]
-        - 子集 {MRI,PET}: mask = [1, 1]
+        - 子集 {MRI}    : 仅对有 MRI 的样本，KL 来自 PoE({MRI}) 融合分布
+        - 子集 {PET}    : 仅对有 PET 的样本，KL 来自 PoE({PET}) 融合分布
+        - 子集 {actual} : 实际可用模态，KL 来自 PoE({available}) 融合分布
+        每个子集独立计算 KL(q_S(z) || p(z))，不共享跨子集的 KL。
         """
         B = mri_avail.shape[0]
         combo_losses = []
-        recon_items  = []   # for logging only
+        recon_items  = []
+        kl_items     = []
 
+        # 各子集用实际可用性：避免对缺失样本的零编码器输出产生错误 KL 梯度
         combos = [
-            (torch.ones(B, dtype=torch.float32, device=mri_avail.device),
+            (mri_avail.float(),
              torch.zeros(B, dtype=torch.float32, device=mri_avail.device)),   # {MRI}
             (torch.zeros(B, dtype=torch.float32, device=mri_avail.device),
-             torch.ones(B, dtype=torch.float32, device=mri_avail.device)),    # {PET}
+             pet_avail.float()),                                                # {PET}
             (mri_avail.float(), pet_avail.float()),                            # {可用模态}
         ]
-
-        # 各模态 encoder 的 KL 只算一次，按样本数加权，避免三个 combo 重复惩罚
-        kl_num = mri_avail.sum() + pet_avail.sum()
-        if kl_num > 0:
-            kl_acc = torch.zeros(1, device=mri_mu.device)
-            if mri_avail.any():
-                kl_acc = kl_acc + self.kl_divergence(
-                    mri_mu[mri_avail], mri_logvar[mri_avail]).sum()
-            if pet_avail.any():
-                kl_acc = kl_acc + self.kl_divergence(
-                    pet_mu[pet_avail], pet_logvar[pet_avail]).sum()
-            per_mod_kl = kl_acc / kl_num
-        else:
-            per_mod_kl = torch.zeros(1, device=mri_mu.device)
 
         for mask_mri, mask_pet in combos:
             combo_avail = (mask_mri + mask_pet).clamp(max=1).bool()
@@ -292,28 +298,37 @@ class M3VAE(nn.Module):
                 [mri_mu, pet_mu], [mri_logvar, pet_logvar], mask)
             z = self.reparameterize(fused_mu, fused_logvar)
 
+            # 每个子集的 KL 用该子集融合后的 PoE 分布计算（论文每个子集各自的 KL_S）
+            kl = self.kl_divergence(
+                fused_mu[combo_avail], fused_logvar[combo_avail]
+            ).mean()
+
             recon_losses = []
+            # 只对本 combo 内的样本做重建（含跨模态：{MRI}子集用 z_MRI 重建 PET）
             if mri_avail.any() and mri is not None:
-                idx_m = mri_avail.nonzero(as_tuple=False).squeeze(1)
-                recon_mri = self.mri_decoder(z[idx_m])
-                recon_losses.append(F.mse_loss(recon_mri, mri[idx_m]))
-                del recon_mri
+                idx_m = (mri_avail & combo_avail).nonzero(as_tuple=False).squeeze(1)
+                if idx_m.numel() > 0:
+                    recon_mri = self.mri_decoder(z[idx_m])
+                    recon_losses.append(F.mse_loss(recon_mri, mri[idx_m]))
+                    del recon_mri
             if pet_avail.any() and pet is not None:
-                idx_p = pet_avail.nonzero(as_tuple=False).squeeze(1)
-                recon_pet = self.pet_decoder(z[idx_p])
-                recon_losses.append(F.mse_loss(recon_pet, pet[idx_p]))
-                del recon_pet
+                idx_p = (pet_avail & combo_avail).nonzero(as_tuple=False).squeeze(1)
+                if idx_p.numel() > 0:
+                    recon_pet = self.pet_decoder(z[idx_p])
+                    recon_losses.append(F.mse_loss(recon_pet, pet[idx_p]))
+                    del recon_pet
 
             if recon_losses:
                 recon_loss = torch.stack(recon_losses).mean()
             else:
                 recon_loss = next(self.mri_decoder.parameters()).sum() * 0.0
 
-            combo_losses.append(recon_loss + Config.KL_WEIGHT * per_mod_kl)
+            combo_losses.append(recon_loss + Config.KL_WEIGHT * kl)
             recon_items.append(recon_loss.detach().item())
+            kl_items.append(kl.detach().item())
 
         avg_recon = sum(recon_items) / len(recon_items) if recon_items else 0.0
-        avg_kl    = per_mod_kl.detach().item()
+        avg_kl    = sum(kl_items)    / len(kl_items)    if kl_items    else 0.0
 
         if combo_losses:
             return torch.stack(combo_losses).mean(), avg_recon, avg_kl

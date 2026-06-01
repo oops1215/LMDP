@@ -171,8 +171,12 @@ def collate_fn(batch: List[Dict]) -> Dict:
     delta_seq  = torch.zeros(B, T_max, 1)
     dx_seq     = torch.full((B, T_max), -1, dtype=torch.long)
     lengths    = torch.tensor([s["length"] for s in batch], dtype=torch.long)
-    has_images = any(s["mri_list"][0] is not None or s["pet_list"][0] is not None
-                     for s in batch)
+    # 检查任意样本任意访视是否有图像（不能只看第 0 次访视）
+    has_images = any(
+        img is not None
+        for s in batch
+        for img in s["mri_list"] + s["pet_list"]
+    )
 
     for b, sample in enumerate(batch):
         T = sample["length"]

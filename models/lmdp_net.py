@@ -36,40 +36,47 @@ from models.irlstm import IRLSTM
 
 class ImputationModule(nn.Module):
     """
-    MinimalRNN 风格的插补模块，用于填充缺失的非图像特征（生物标志物）。
+    MinimalRNN 风格的插补模块，仅预测生物标志物（6D）以填充缺失值。
 
     论文 Section III 描述：
       用前一时间步的预测值填充缺失值。
-      imputed_x = m * x + (1 - m) * x_pred
+      imputed_bio = bio_mask * bio_t + (1 - bio_mask) * bio_pred
 
     具体实现：
-      x_pred_t = W_imp * h_{t-1} + b_imp（从前一步隐藏态预测）
-      imputed_x_t = m_t * x_t + (1 - m_t) * x_pred_t
+      bio_pred = W_imp * h_{t-1} + b_imp（从前一步隐藏态预测 6 维生物标志物）
+      非生物标志物特征（年龄、教育、性别、APOE4）始终用实测值，不做插补。
     """
 
     def __init__(self,
-                 hidden_dim:   int = Config.HIDDEN_DIM,
-                 non_img_dim:  int = Config.NON_IMG_DIM):
+                 hidden_dim:    int = Config.HIDDEN_DIM,
+                 non_img_dim:   int = Config.NON_IMG_DIM,
+                 biomarker_dim: int = Config.BIOMARKER_DIM):
         super().__init__()
-        self.predictor = nn.Linear(hidden_dim, non_img_dim)
+        self.biomarker_dim = biomarker_dim
+        self.non_img_dim   = non_img_dim
+        # 只预测生物标志物维度（年龄/教育/遗传学不需要插补）
+        self.predictor = nn.Linear(hidden_dim, biomarker_dim)
 
     def forward(self,
-                x_t:    torch.Tensor,
-                m_t:    torch.Tensor,
-                h_prev: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                x_t:       torch.Tensor,
+                bio_mask_t: torch.Tensor,
+                h_prev:    torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        x_t    : (B, non_img_dim)  当前访视特征（含缺失值，缺失处为 0）
-        m_t    : (B, non_img_dim)  掩码，1=实测，0=缺失
-        h_prev : (B, hidden_dim)   上一步隐藏状态（第一步时为全零）
+        x_t        : (B, non_img_dim)   当前访视全特征（含缺失生物标志物，缺失处为 0）
+        bio_mask_t : (B, biomarker_dim) 生物标志物观测掩码，1=实测，0=缺失
+        h_prev     : (B, hidden_dim)    上一步隐藏状态（第一步时为全零）
 
         返回
         ----
-        x_imputed : (B, non_img_dim)  插补后的特征
-        x_pred    : (B, non_img_dim)  模型对 x_t 的预测（用于 L_i 损失）
+        x_imputed : (B, non_img_dim)   插补后的全特征（非生物标志物维度直接用实测值）
+        bio_pred  : (B, biomarker_dim) 生物标志物预测值（用于 L_i 损失）
         """
-        x_pred    = self.predictor(h_prev)                    # 从上一步隐藏态预测
-        x_imputed = m_t * x_t + (1.0 - m_t) * x_pred        # 实测用实测，缺失用预测
-        return x_imputed, x_pred
+        bio_pred    = self.predictor(h_prev)                             # (B, biomarker_dim)
+        bio_imputed = bio_mask_t * x_t[:, :self.biomarker_dim] + \
+                      (1.0 - bio_mask_t) * bio_pred                     # (B, biomarker_dim)
+        # 非生物标志物维度（人口统计+遗传）始终使用实测值
+        x_imputed = torch.cat([bio_imputed, x_t[:, self.biomarker_dim:]], dim=1)
+        return x_imputed, bio_pred
 
 
 # ─── LMDP-Net 完整模型 ────────────────────────────────────────────────────────
@@ -108,7 +115,7 @@ class LMDPNet(nn.Module):
 
         # 模块
         self.m3vae      = M3VAE(latent_dim)
-        self.imputation = ImputationModule(hidden_dim, non_img_dim)
+        self.imputation = ImputationModule(hidden_dim, non_img_dim, biomarker_dim)
         self.irlstm     = IRLSTM(
             input_dim  = latent_dim + non_img_dim,  # 269
             hidden_dim = hidden_dim,
@@ -173,13 +180,10 @@ class LMDPNet(nn.Module):
             # ── 插补（使用上一步 LSTM 隐藏态）──────────────────────────────
             non_img_t  = non_img_seq[:, t, :]        # (B, non_img_dim)
             bio_mask_t = bio_mask_seq[:, t, :]       # (B, 6)
-            non_img_mask = torch.cat([
-                bio_mask_t,
-                torch.ones(B, self.non_img_dim - self.biomarker_dim, device=device)
-            ], dim=1)  # (B, non_img_dim)
 
-            x_imputed, x_pred = self.imputation(non_img_t, non_img_mask, h)
-            all_x_pred.append(x_pred)
+            # 传入 bio_mask_t（6D），ImputationModule 内部只对生物标志物插补
+            x_imputed, bio_pred = self.imputation(non_img_t, bio_mask_t, h)
+            all_x_pred.append(bio_pred)              # (B, biomarker_dim)
 
             # ── IRLSTM 单步（交替推进，使下一步插补能用到当前隐藏态）──────
             u_t = torch.cat([fused_mu, x_imputed], dim=1)  # (B, latent+non_img)
@@ -225,31 +229,35 @@ class LMDPNet(nn.Module):
         # L_total = L_p + L_i + L_f（论文 eq.27，等权重）
         total = lp + li + lf
 
-        # 各模态平均贡献率（跨时间步平均）
+        # 各模态平均贡献率（跨时间步平均，contribs 为 5 元组）
         if all_contribs:
             n = len(all_contribs)
-            avg_c_mri   = sum(c[0] for c in all_contribs) / n
-            avg_c_pet   = sum(c[1] for c in all_contribs) / n
-            avg_c_prior = sum(c[2] for c in all_contribs) / n
+            avg_c_mri      = sum(c[0] for c in all_contribs) / n
+            avg_c_pet      = sum(c[1] for c in all_contribs) / n
+            avg_c_prior    = sum(c[2] for c in all_contribs) / n
+            avg_c_mri_cond = sum(c[3] for c in all_contribs) / n  # 有 MRI 时的条件贡献
+            avg_c_pet_cond = sum(c[4] for c in all_contribs) / n  # 有 PET 时的条件贡献
         else:
-            avg_c_mri = avg_c_pet = 0.0
+            avg_c_mri = avg_c_pet = avg_c_mri_cond = avg_c_pet_cond = 0.0
             avg_c_prior = 1.0
 
         avg_recon = sum(recon_logs) / len(recon_logs) if recon_logs else 0.0
         avg_kl    = sum(kl_logs)    / len(kl_logs)    if kl_logs    else 0.0
 
         return {
-            "total_loss"   : total,
-            "lp"           : lp.item(),
-            "li"           : li.item(),
-            "lf"           : lf.item(),
-            "lf_recon"     : avg_recon,      # 重建损失（期望下降）
-            "lf_kl"        : avg_kl,         # 原始 KL（未乘 β，供监控）
-            "dx_preds"     : dx_logits_seq,
-            "bio_preds"    : bio_pred_seq,
-            "contrib_mri"  : avg_c_mri,
-            "contrib_pet"  : avg_c_pet,
-            "contrib_prior": avg_c_prior,
+            "total_loss"       : total,
+            "lp"               : lp.item(),
+            "li"               : li.item(),
+            "lf"               : lf.item(),
+            "lf_recon"         : avg_recon,
+            "lf_kl"            : avg_kl,
+            "dx_preds"         : dx_logits_seq,
+            "bio_preds"        : bio_pred_seq,
+            "contrib_mri"      : avg_c_mri,
+            "contrib_pet"      : avg_c_pet,
+            "contrib_prior"    : avg_c_prior,
+            "contrib_mri_cond" : avg_c_mri_cond,  # 有 MRI 时的真实编码器贡献
+            "contrib_pet_cond" : avg_c_pet_cond,  # 有 PET 时的真实编码器贡献
         }
 
     # ── 诊断预测损失（多步）────────────────────────────────────────────────
@@ -292,7 +300,7 @@ class LMDPNet(nn.Module):
         losses = []
 
         for t in range(T):
-            x_pred_t = x_pred_list[t][:, :self.biomarker_dim]  # (B, 6)
+            x_pred_t = x_pred_list[t]                           # (B, biomarker_dim) 已是 6D
             x_true_t = non_img_seq[:, t, :self.biomarker_dim]   # (B, 6)
             mask_t   = bio_mask[:, t, :]                         # (B, 6)
 

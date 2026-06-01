@@ -98,7 +98,8 @@ class IRLSTMCell(nn.Module):
         c_t : (B, hidden_dim)
         """
         # ── 1. 隐藏状态时间衰减（eq.16, eq.17）──────────────────────────
-        gamma_h = torch.exp(-F.softplus(self.W_gamma_h(delta)))   # (B, hidden_dim)
+        # 论文公式：exp(-max(0, W·δ+b))，用 relu 精确实现（softplus 是平滑近似）
+        gamma_h = torch.exp(-F.relu(self.W_gamma_h(delta)))       # (B, hidden_dim)
         h_est   = h_prev * gamma_h                                 # 时间衰减后的估计隐藏态
 
         # ── 2. 细胞候选（eq.18）────────────────────────────────────────
