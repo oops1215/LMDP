@@ -308,6 +308,10 @@ def train_fold(fold_idx:    int,
     for epoch in range(1, Config.NUM_EPOCHS + 1):
         t0 = time.time()
 
+        # KL warmup：线性从 0 增长到目标 kl_weight
+        if args.kl_warmup_epochs > 0:
+            Config.KL_WEIGHT = args.kl_weight * min(1.0, epoch / args.kl_warmup_epochs)
+
         train_log = train_epoch(model, train_loader, optimizer, device, args.load_images, scaler)
         val_metrics = evaluate_fold(model, val_loader, device, args.load_images)
 
@@ -390,6 +394,8 @@ def main():
                         help="β-VAE KL 权重（论文推荐范围 0.001–0.1）")
     parser.add_argument("--filter_no_image", action="store_true",
                         help="过滤掉所有访次均无图像的受试者")
+    parser.add_argument("--kl_warmup_epochs", type=int, default=20,
+                        help="KL 权重从 0 线性增长到 --kl_weight 所需的 epoch 数（0=不做 warmup）")
     args = parser.parse_args()
     args.load_images = not args.no_images
     Config.KL_WEIGHT = args.kl_weight
