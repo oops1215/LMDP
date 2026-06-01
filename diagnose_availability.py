@@ -114,3 +114,35 @@ print()
 print("结论判断：")
 print("  · 若'无图像'≈98% → prior 高是数据决定的，属正常")
 print("  · 若'无图像'<<98% 但 prior 仍 98% → encoder logvar 过大，需增大 kl_weight")
+
+# ── 3. 按受试者统计：有无图像 ───────────────────────────────────────────────
+print()
+print("=" * 60)
+print("3. 受试者级别图像分布（用于评估过滤策略）")
+print("=" * 60)
+
+subj_has_image = 0
+subj_no_image  = 0
+visits_kept = 0
+visits_removed = 0
+
+for ptid in subjects:
+    visits = subject_dict[ptid]['visits']
+    has_any_image = any(
+        v.get('mri_path') is not None or v.get('pet_path') is not None
+        for v in visits
+    )
+    if has_any_image:
+        subj_has_image += 1
+        visits_kept += len(visits)
+    else:
+        subj_no_image += 1
+        visits_removed += len(visits)
+
+total_subj = len(subjects)
+total_vis  = visits_kept + visits_removed
+print(f"有至少一张图像的受试者: {subj_has_image} / {total_subj} = {100*subj_has_image/total_subj:.1f}%")
+print(f"完全无图像的受试者:     {subj_no_image} / {total_subj} = {100*subj_no_image/total_subj:.1f}%")
+print()
+print(f"过滤后保留访次: {visits_kept} / {total_vis} = {100*visits_kept/total_vis:.1f}%")
+print(f"过滤后删除访次: {visits_removed} / {total_vis} = {100*visits_removed/total_vis:.1f}%")
