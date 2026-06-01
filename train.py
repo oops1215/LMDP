@@ -28,7 +28,16 @@ import numpy as np
 import torch
 import torch.optim as optim
 from tqdm import tqdm
-from typing import Dict
+from typing import Dict, List, Tuple
+
+try:
+    import matplotlib
+    matplotlib.use('Agg')        # 非交互后端，适合无显示器服务器
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+    _HAS_MPL = True
+except ImportError:
+    _HAS_MPL = False
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import Config
@@ -83,13 +92,107 @@ def train_epoch(model: LMDPNet,
     }
 
 
+# ─── 贡献率可视化 ─────────────────────────────────────────────────────────────
+
+def _plot_contrib_fold(history: List[Tuple], save_dir: str, fold_idx: int) -> None:
+    """
+    单折堆叠面积图：x=epoch，y=贡献率，三层分别为 MRI / PET / Prior。
+    保存到 <save_dir>/contrib_rates.png
+    """
+    if not _HAS_MPL or not history:
+        return
+
+    epochs  = [h[0] for h in history]
+    c_mri   = np.array([h[1] for h in history])
+    c_pet   = np.array([h[2] for h in history])
+    c_prior = np.array([h[3] for h in history])
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.stackplot(epochs, c_mri, c_pet, c_prior,
+                 labels=["MRI", "PET", "Prior  N(0,I)"],
+                 colors=["#4C72B0", "#DD8452", "#AAAAAA"],
+                 alpha=0.85)
+    ax.set_xlim(epochs[0], epochs[-1])
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("Epoch", fontsize=12)
+    ax.set_ylabel("Contribution Rate", fontsize=12)
+    ax.set_title(
+        f"Fold {fold_idx + 1} — Modality Contribution Rates  (PoE precision weighting)",
+        fontsize=12)
+    ax.legend(loc="upper right", fontsize=10)
+    ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
+    ax.grid(axis='y', linestyle='--', alpha=0.4)
+    fig.tight_layout()
+
+    path = os.path.join(save_dir, "contrib_rates.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  [图] 模态贡献率曲线 → {path}")
+
+
+def _plot_contrib_all_folds(all_histories: List[List[Tuple]],
+                             save_dir: str) -> None:
+    """
+    多折汇总图：三个子图分别展示 MRI / PET / Prior 的均值 ± 标准差。
+    保存到 <save_dir>/contrib_rates_all_folds.png
+    """
+    if not _HAS_MPL or not all_histories:
+        return
+
+    labels = ["MRI", "PET", "Prior  N(0,I)"]
+    colors = ["#4C72B0", "#DD8452", "#888888"]
+
+    # 按最短折对齐
+    min_len = min(len(h) for h in all_histories if h)
+    if min_len == 0:
+        return
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=False)
+
+    for col, (label, color) in enumerate(zip(labels, colors)):
+        ax = axes[col]
+        mat = np.array([[h[col + 1] for h in hist[:min_len]]
+                        for hist in all_histories if hist])  # (n_folds, min_len)
+        epochs = [all_histories[0][i][0] for i in range(min_len)]
+
+        mean = mat.mean(axis=0)
+        std  = mat.std(axis=0)
+
+        ax.fill_between(epochs, mean - std, mean + std,
+                        alpha=0.25, color=color)
+        ax.plot(epochs, mean, color=color, linewidth=2.2, label="Mean ± Std")
+
+        # 各折细线
+        fold_clrs = plt.cm.tab10.colors
+        for fi, row in enumerate(mat):
+            ax.plot(epochs, row, color=fold_clrs[fi % 10],
+                    linewidth=0.8, alpha=0.55, label=f"Fold {fi+1}")
+
+        ax.set_title(label, fontsize=12)
+        ax.set_xlabel("Epoch", fontsize=10)
+        ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
+        ax.grid(linestyle='--', alpha=0.35)
+        ax.legend(fontsize=7, ncol=2)
+
+    fig.suptitle(
+        "Modality Contribution Rates — All Folds  (mean ± std)",
+        fontsize=13, y=1.01)
+    fig.tight_layout()
+
+    path = os.path.join(save_dir, "contrib_rates_all_folds.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"\n[图] 全折贡献率对比图 → {path}")
+
+
 # ─── 单 Fold 训练 ─────────────────────────────────────────────────────────────
 
 def train_fold(fold_idx:    int,
                args,
-               device:      str) -> Dict:
+               device:      str) -> Tuple[Dict, List[Tuple]]:
     """
-    训练第 fold_idx 折，返回该折的最佳验证指标。
+    训练第 fold_idx 折，返回 (最佳验证指标, 贡献率历史)。
+    贡献率历史格式：[(epoch, c_mri, c_pet, c_prior), ...]
     """
     print(f"\n{'='*60}")
     print(f"  Fold {fold_idx + 1} / {Config.K_FOLDS}")
@@ -118,10 +221,11 @@ def train_fold(fold_idx:    int,
     optimizer = optim.Adam(model.parameters(), lr=Config.LEARNING_RATE)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
 
-    best_val_loss = float("inf")
-    best_metrics  = {}
-    patience      = 20
-    no_improve    = 0
+    best_val_loss    = float("inf")
+    best_metrics     = {}
+    patience         = 20
+    no_improve       = 0
+    contrib_history: List[Tuple] = []
 
     ckpt_dir = os.path.join("checkpoints", f"fold{fold_idx}")
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -134,6 +238,13 @@ def train_fold(fold_idx:    int,
 
         scheduler.step()
         elapsed = time.time() - t0
+
+        contrib_history.append((
+            epoch,
+            train_log["contrib_mri"],
+            train_log["contrib_pet"],
+            train_log["contrib_prior"],
+        ))
 
         print(f"  Epoch {epoch:3d}/{Config.NUM_EPOCHS} "
               f"| loss={train_log['loss']:.4f} "
@@ -165,7 +276,8 @@ def train_fold(fold_idx:    int,
 
     print(f"\n  Fold {fold_idx + 1} 最佳结果:")
     print_metrics(best_metrics)
-    return best_metrics
+    _plot_contrib_fold(contrib_history, ckpt_dir, fold_idx)
+    return best_metrics, contrib_history
 
 
 # ─── 主函数 ───────────────────────────────────────────────────────────────────
@@ -197,10 +309,12 @@ def main():
 
     fold_range = range(Config.K_FOLDS) if args.fold == -1 else [args.fold]
 
-    all_fold_metrics = []
+    all_fold_metrics  = []
+    all_fold_histories = []
     for fold_idx in fold_range:
-        metrics = train_fold(fold_idx, args, device)
+        metrics, history = train_fold(fold_idx, args, device)
         all_fold_metrics.append(metrics)
+        all_fold_histories.append(history)
 
     if len(all_fold_metrics) > 1:
         print(f"\n{'='*60}")
@@ -210,6 +324,9 @@ def main():
         for k in keys:
             vals = [m.get(k, 0) for m in all_fold_metrics]
             print(f"  {k.upper():6s}: {np.mean(vals):.4f} ± {np.std(vals):.4f}")
+
+        _plot_contrib_all_folds(all_fold_histories,
+                                save_dir=os.path.join("checkpoints"))
 
 
 # ─── 辅助 ────────────────────────────────────────────────────────────────────
