@@ -237,24 +237,22 @@ class LMDPNet(nn.Module):
         用 h_t 预测第 t+1 步诊断 → logits[:, t, :] 对应标签 labels[:, t+1]。
         """
         B, T, C = logits.shape
-        device = logits.device
-        total_loss = torch.tensor(0.0, device=device)
-        count = 0
+        losses = []
 
         for b in range(B):
-            L = lengths[b].item()
-            # 预测 t+1 步（t 从 0 到 L-2）
-            for t in range(min(int(L) - 1, T - 1)):
+            L = int(lengths[b].item())
+            for t in range(min(L - 1, T - 1)):
                 label = labels[b, t + 1].item()
                 if label < 0:
                     continue
-                total_loss = total_loss + F.cross_entropy(
+                losses.append(F.cross_entropy(
                     logits[b, t].unsqueeze(0),
-                    torch.tensor([label], device=device, dtype=torch.long)
-                )
-                count += 1
+                    torch.tensor([label], device=logits.device, dtype=torch.long)
+                ))
 
-        return total_loss / max(count, 1)
+        if losses:
+            return torch.stack(losses).mean()
+        return logits.sum() * 0.0  # 全被掩码时返回可微分的零
 
     # ── 插补损失 ──────────────────────────────────────────────────────────────
     def _compute_li(self,
@@ -268,24 +266,20 @@ class LMDPNet(nn.Module):
         论文 eq.29：只对实测生物标志物值计算 MAE 插补损失。
         x_pred[t] 是对第 t 步生物标志物的预测（来自 h_{t-1}）。
         """
-        device = non_img_seq.device
-        total_loss = torch.tensor(0.0, device=device)
-        count = 0
+        losses = []
 
         for t in range(T):
-            x_pred_t = x_pred_list[t][:, :self.biomarker_dim]  # (B, 6) 只看 bio 部分
+            x_pred_t = x_pred_list[t][:, :self.biomarker_dim]  # (B, 6)
             x_true_t = non_img_seq[:, t, :self.biomarker_dim]   # (B, 6)
             mask_t   = bio_mask[:, t, :]                         # (B, 6)
 
-            # 只对实测值计算损失（mask=1 的位置）
             active = (mask_t > 0)
             if active.any():
-                total_loss = total_loss + F.l1_loss(
-                    x_pred_t[active], x_true_t[active]
-                )
-                count += 1
+                losses.append(F.l1_loss(x_pred_t[active], x_true_t[active]))
 
-        return total_loss / max(count, 1)
+        if losses:
+            return torch.stack(losses).mean()
+        return non_img_seq.sum() * 0.0  # 全缺失时返回可微分的零
 
 
 # ─── 简单单步推理接口 ────────────────────────────────────────────────────────

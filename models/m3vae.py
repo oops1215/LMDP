@@ -234,7 +234,7 @@ class M3VAE(nn.Module):
         - 子集 {MRI,PET}: mask = [1, 1]
         """
         B = mri_avail.shape[0]
-        total_loss = torch.tensor(0.0, device=mri_avail.device)
+        combo_losses = []
         n_valid_combos = 0
 
         # 论文训练时对所有受试者的所有子集都计算损失
@@ -264,31 +264,32 @@ class M3VAE(nn.Module):
             recon_mri = self.mri_decoder(z)  # (B, 1, 128, 160, 128)
             recon_pet = self.pet_decoder(z)
 
-            # 重建损失（仅对实际有图像的样本计算）
-            recon_loss = torch.tensor(0.0, device=mri_avail.device)
-            cnt = 0
+            # 重建损失：始终通过解码器计算以保证 grad_fn
+            recon_losses = []
             if mri_avail.any() and mri is not None:
                 idx_m = mri_avail.nonzero(as_tuple=False).squeeze(1)
-                recon_loss = recon_loss + F.mse_loss(recon_mri[idx_m], mri[idx_m])
-                cnt += 1
+                recon_losses.append(F.mse_loss(recon_mri[idx_m], mri[idx_m]))
             if pet_avail.any() and pet is not None:
                 idx_p = pet_avail.nonzero(as_tuple=False).squeeze(1)
-                recon_loss = recon_loss + F.mse_loss(recon_pet[idx_p], pet[idx_p])
-                cnt += 1
-            if cnt > 0:
-                recon_loss = recon_loss / cnt
+                recon_losses.append(F.mse_loss(recon_pet[idx_p], pet[idx_p]))
+
+            # 无可用图像时用解码器输出自身产生可微分的零
+            if recon_losses:
+                recon_loss = torch.stack(recon_losses).mean()
+            else:
+                recon_loss = (recon_mri.sum() + recon_pet.sum()) * 0.0
 
             # KL 损失（仅对 combo_avail 的样本）
             kl_loss = self.kl_divergence(
                 fused_mu[combo_avail], fused_logvar[combo_avail]
             ).mean()
 
-            total_loss = total_loss + recon_loss + kl_loss
+            combo_losses.append(recon_loss + kl_loss)
             n_valid_combos += 1
 
-        if n_valid_combos > 0:
-            total_loss = total_loss / n_valid_combos
-        return total_loss
+        if combo_losses:
+            return torch.stack(combo_losses).mean()
+        return (mri_mu.sum() + pet_mu.sum()) * 0.0  # 极端情况下的可微分零
 
     # ── 获取推理用融合均值（论文 eq.10）──────────────────────────────────────
     @torch.no_grad()
