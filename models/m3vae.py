@@ -268,16 +268,19 @@ class M3VAE(nn.Module):
             (mri_avail.float(), pet_avail.float()),                            # {可用模态}
         ]
 
-        # 各模态 encoder 的 KL 只算一次，避免被三个 combo 重复惩罚
-        per_mod_kl_terms = []
-        if mri_avail.any():
-            per_mod_kl_terms.append(
-                self.kl_divergence(mri_mu[mri_avail], mri_logvar[mri_avail]).mean())
-        if pet_avail.any():
-            per_mod_kl_terms.append(
-                self.kl_divergence(pet_mu[pet_avail], pet_logvar[pet_avail]).mean())
-        per_mod_kl = torch.stack(per_mod_kl_terms).mean() if per_mod_kl_terms else \
-                     (mri_mu.sum() * 0.0)
+        # 各模态 encoder 的 KL 只算一次，按样本数加权，避免三个 combo 重复惩罚
+        kl_num = mri_avail.sum() + pet_avail.sum()
+        if kl_num > 0:
+            kl_acc = torch.zeros(1, device=mri_mu.device)
+            if mri_avail.any():
+                kl_acc = kl_acc + self.kl_divergence(
+                    mri_mu[mri_avail], mri_logvar[mri_avail]).sum()
+            if pet_avail.any():
+                kl_acc = kl_acc + self.kl_divergence(
+                    pet_mu[pet_avail], pet_logvar[pet_avail]).sum()
+            per_mod_kl = kl_acc / kl_num
+        else:
+            per_mod_kl = torch.zeros(1, device=mri_mu.device)
 
         for mask_mri, mask_pet in combos:
             combo_avail = (mask_mri + mask_pet).clamp(max=1).bool()
