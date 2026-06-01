@@ -66,6 +66,7 @@ class Config:
     K_FOLDS       = 5
     SEED          = 42
     MAX_SEQ_LEN   = 6   # max 6 visits (M0–M60)
+    DX_MASK_PROB  = 0.5  # probability of masking current-visit diagnosis during training
 
     # ─── Hardware ─────────────────────────────────────────────────────────────
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

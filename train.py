@@ -50,6 +50,7 @@ def train_epoch(model: LMDPNet,
 
     for batch in tqdm(loader, desc="  Train", leave=False):
         batch = _to_device(batch, device, load_images)
+        batch = _mask_current_dx(batch, Config.DX_MASK_PROB)
         optimizer.zero_grad()
 
         out = model(batch, is_training=True)
@@ -202,6 +203,21 @@ def main():
 
 
 # ─── 辅助 ────────────────────────────────────────────────────────────────────
+
+def _mask_current_dx(batch: dict, prob: float) -> dict:
+    """
+    训练时随机掩码当前访视诊断标签（论文 Section IV.A）。
+    每个有效标签以概率 prob 被设为 -1，_compute_lp 会跳过 -1 标签。
+    防止模型直接复制当前诊断而不学习纵向变化规律。
+    """
+    if prob <= 0.0:
+        return batch
+    dx = batch["dx_seq"].clone()                      # (B, T)
+    valid = dx >= 0                                    # 只掩码有效标签
+    mask  = torch.rand_like(dx.float()) < prob        # 随机掩码矩阵
+    dx[valid & mask] = -1
+    return {**batch, "dx_seq": dx}
+
 
 def _to_device(batch: dict, device: str, load_images: bool) -> dict:
     """将 batch 中的张量移到指定设备。"""
