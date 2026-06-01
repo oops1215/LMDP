@@ -54,7 +54,8 @@ def train_epoch(model: LMDPNet,
                 loader,
                 optimizer: torch.optim.Optimizer,
                 device: str,
-                load_images: bool = True) -> Dict:
+                load_images: bool = True,
+                scaler=None) -> Dict:
     model.train()
     total_loss = lp_sum = li_sum = lf_sum = 0.0
     recon_sum = kl_sum = 0.0
@@ -66,12 +67,21 @@ def train_epoch(model: LMDPNet,
         batch = _mask_current_dx(batch, Config.DX_MASK_PROB)
         optimizer.zero_grad()
 
-        out = model(batch, is_training=True)
-        loss = out["total_loss"]
-        loss.backward()
-
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-        optimizer.step()
+        if scaler is not None:
+            with torch.cuda.amp.autocast():
+                out = model(batch, is_training=True)
+                loss = out["total_loss"]
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            out = model(batch, is_training=True)
+            loss = out["total_loss"]
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
 
         total_loss  += loss.item()
         lp_sum      += out["lp"]
@@ -281,6 +291,8 @@ def train_fold(fold_idx:    int,
                            lr=Config.LEARNING_RATE,
                            weight_decay=Config.WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
+    # 混合精度：float16 激活值，显存减半（仅 CUDA 启用）
+    scaler = torch.cuda.amp.GradScaler() if device == "cuda" else None
 
     best_val_loss     = float("inf")
     best_metrics      = {}
@@ -295,7 +307,7 @@ def train_fold(fold_idx:    int,
     for epoch in range(1, Config.NUM_EPOCHS + 1):
         t0 = time.time()
 
-        train_log = train_epoch(model, train_loader, optimizer, device, args.load_images)
+        train_log = train_epoch(model, train_loader, optimizer, device, args.load_images, scaler)
         val_metrics = evaluate_fold(model, val_loader, device, args.load_images)
 
         scheduler.step()
