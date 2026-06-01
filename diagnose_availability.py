@@ -16,11 +16,43 @@ print("=" * 60)
 with open(Config.TAB_PROCESSED_PATH, 'rb') as f:
     data = pickle.load(f)
 
-subjects = list(data['data'].keys())
+# 自动探测结构
+print(f"pickle 顶层类型: {type(data)}")
+if isinstance(data, dict):
+    print(f"顶层 keys: {list(data.keys())[:10]}")
+    # 尝试找到受试者字典：值为 dict 且含 'visits'
+    root = data
+    sample_key = next(iter(root))
+    sample_val = root[sample_key]
+    if isinstance(sample_val, dict) and 'visits' in sample_val:
+        subject_dict = root                     # 顶层直接是 {ptid: {...}}
+    elif 'data' in root:
+        subject_dict = root['data']
+    elif 'subjects' in root:
+        subject_dict = root['subjects']
+    else:
+        # 找第一个值是 dict-with-visits 的 key
+        subject_dict = None
+        for k, v in root.items():
+            if isinstance(v, dict) and any(
+                isinstance(vv, dict) and 'visits' in vv
+                for vv in (v.values() if isinstance(v, dict) else [])
+            ):
+                subject_dict = v
+                print(f"  → 受试者数据在 key='{k}'")
+                break
+        if subject_dict is None:
+            print("无法自动定位受试者字典，请检查 pickle 结构")
+            raise SystemExit(1)
+else:
+    print(f"顶层不是 dict，而是 {type(data)}，请检查 pickle 结构")
+    raise SystemExit(1)
+
+subjects = list(subject_dict.keys())
 total_visits = mri_n = pet_n = both_n = neither_n = 0
 
 for ptid in subjects:
-    for v in data['data'][ptid]['visits']:
+    for v in subject_dict[ptid]['visits']:
         total_visits += 1
         has_mri = v.get('mri_path') is not None
         has_pet = v.get('pet_path') is not None
