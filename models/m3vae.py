@@ -200,8 +200,8 @@ class M3VAE(nn.Module):
         idx = avail.nonzero(as_tuple=False).squeeze(1)
         if idx.numel() > 0 and img is not None:
             mu_sub, logvar_sub = encoder(img[idx])
-            mu[idx]     = mu_sub
-            logvar[idx] = logvar_sub
+            mu[idx]     = mu_sub.to(mu.dtype)
+            logvar[idx] = logvar_sub.to(logvar.dtype)
         return mu, logvar
 
     # ── 重参数化采样 ──────────────────────────────────────────────────────────
