@@ -143,13 +143,12 @@ class LMDPNet(nn.Module):
         lengths      = batch["lengths"]            # (B,)   int
 
         # 存储每步输出
-        all_fused_mu  = []    # (T,) each (B, latent_dim)
-        all_imputed   = []    # (T,) each (B, non_img_dim)
         all_x_pred    = []    # (T,) each (B, non_img_dim) — 用于插补损失
         vae_losses    = []
 
         h = torch.zeros(B, self.hidden_dim, device=device)
         c = torch.zeros(B, self.hidden_dim, device=device)
+        hiddens = []
 
         for t in range(T):
             mri_t   = self._extract_step(mri_seq, t)    # (B,1,D,H,W) or None
@@ -164,37 +163,33 @@ class LMDPNet(nn.Module):
             else:
                 fused_mu = self.m3vae.get_fused_mu(mri_t, pet_t, mri_av, pet_av)
 
-            all_fused_mu.append(fused_mu)
-
-            # ── 插补 ────────────────────────────────────────────────────────
-            non_img_t    = non_img_seq[:, t, :]        # (B, non_img_dim)
-            bio_mask_t   = bio_mask_seq[:, t, :]       # (B, 6)
-            # 插补只对生物标志物（前 6 维）；demo 和 gen 通常不缺失
+            # ── 插补（使用上一步 LSTM 隐藏态）──────────────────────────────
+            non_img_t  = non_img_seq[:, t, :]        # (B, non_img_dim)
+            bio_mask_t = bio_mask_seq[:, t, :]       # (B, 6)
             non_img_mask = torch.cat([
                 bio_mask_t,
                 torch.ones(B, self.non_img_dim - self.biomarker_dim, device=device)
             ], dim=1)  # (B, non_img_dim)
 
             x_imputed, x_pred = self.imputation(non_img_t, non_img_mask, h)
-            all_imputed.append(x_imputed)
             all_x_pred.append(x_pred)
 
-        # ── 构建 IRLSTM 输入序列 ────────────────────────────────────────────
-        inputs_seq  = torch.stack(
-            [torch.cat([all_fused_mu[t], all_imputed[t]], dim=1) for t in range(T)],
-            dim=1,
-        )  # (B, T, latent_dim + non_img_dim)
+            # ── IRLSTM 单步（交替推进，使下一步插补能用到当前隐藏态）──────
+            u_t = torch.cat([fused_mu, x_imputed], dim=1)  # (B, latent+non_img)
+            m_t = torch.cat([
+                mod_avail[:, t, :],                                                    # (B,2)
+                bio_mask_t,                                                             # (B,6)
+                torch.ones(B, self.non_img_dim - self.biomarker_dim, device=device),  # (B,7)
+            ], dim=1)  # (B, mask_dim=15)
 
-        # 掩码序列：[mri_avail, pet_avail, bio_mask, 全1_demo_gen]
-        masks_seq = torch.cat([
-            mod_avail,                          # (B,T,2)
-            bio_mask_seq,                       # (B,T,6)
-            torch.ones(B, T, self.non_img_dim - self.biomarker_dim, device=device),
-        ], dim=2)  # (B, T, mask_dim=15)
+            active = (t < lengths).float().unsqueeze(1)   # (B,1)
+            h_new, c_new = self.irlstm.cell(u_t, m_t, delta_seq[:, t, :], h, c)
+            h = h_new * active + h * (1.0 - active)
+            c = c_new * active + c * (1.0 - active)
+            hiddens.append(h.unsqueeze(1))
 
-        # ── IRLSTM ──────────────────────────────────────────────────────────
-        hidden_seq = self.irlstm(inputs_seq, masks_seq, delta_seq, lengths)
-        # hidden_seq: (B, T, hidden_dim)
+        # ── 拼接隐藏态序列 ───────────────────────────────────────────────────
+        hidden_seq = torch.cat(hiddens, dim=1)  # (B, T, hidden_dim)
 
         # ── 预测头：预测下一时间步（论文 eq.25, eq.26）──────────────────────
         # 从第 t 步的隐藏态预测第 t+1 步的诊断和生物标志物

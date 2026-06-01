@@ -102,7 +102,7 @@ class IRLSTMCell(nn.Module):
         h_est   = h_prev * gamma_h                                 # 时间衰减后的估计隐藏态
 
         # ── 2. 细胞候选（eq.18）────────────────────────────────────────
-        c_tilde = torch.sigmoid(self.W_uc(u_t) + self.W_hc(h_est) + self.W_mc(m_t))
+        c_tilde = torch.tanh(self.W_uc(u_t) + self.W_hc(h_est) + self.W_mc(m_t))
 
         # ── 3. 输出门（eq.19）──────────────────────────────────────────
         o_t = torch.sigmoid(self.W_uo(u_t) + self.W_ho(h_est) + self.W_mo(m_t))

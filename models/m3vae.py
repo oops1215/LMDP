@@ -205,10 +205,9 @@ class M3VAE(nn.Module):
         return mu, logvar
 
     # ── 重参数化采样 ──────────────────────────────────────────────────────────
-    @staticmethod
-    def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         """z = μ + σ * ε，ε ~ N(0, I)（论文 eq.8）"""
-        if not M3VAE.training:
+        if not self.training:
             return mu
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
