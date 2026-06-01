@@ -259,7 +259,6 @@ class M3VAE(nn.Module):
         B = mri_avail.shape[0]
         combo_losses = []
         recon_items  = []   # for logging only
-        kl_items     = []   # raw KL before β weighting, for logging only
 
         combos = [
             (torch.ones(B, dtype=torch.float32, device=mri_avail.device),
@@ -268,6 +267,17 @@ class M3VAE(nn.Module):
              torch.ones(B, dtype=torch.float32, device=mri_avail.device)),    # {PET}
             (mri_avail.float(), pet_avail.float()),                            # {可用模态}
         ]
+
+        # 各模态 encoder 的 KL 只算一次，避免被三个 combo 重复惩罚
+        per_mod_kl_terms = []
+        if mri_avail.any():
+            per_mod_kl_terms.append(
+                self.kl_divergence(mri_mu[mri_avail], mri_logvar[mri_avail]).mean())
+        if pet_avail.any():
+            per_mod_kl_terms.append(
+                self.kl_divergence(pet_mu[pet_avail], pet_logvar[pet_avail]).mean())
+        per_mod_kl = torch.stack(per_mod_kl_terms).mean() if per_mod_kl_terms else \
+                     (mri_mu.sum() * 0.0)
 
         for mask_mri, mask_pet in combos:
             combo_avail = (mask_mri + mask_pet).clamp(max=1).bool()
@@ -296,16 +306,11 @@ class M3VAE(nn.Module):
             else:
                 recon_loss = next(self.mri_decoder.parameters()).sum() * 0.0
 
-            kl_loss = self.kl_divergence(
-                fused_mu[combo_avail], fused_logvar[combo_avail]
-            ).mean()
-
-            combo_losses.append(recon_loss + Config.KL_WEIGHT * kl_loss)
+            combo_losses.append(recon_loss + Config.KL_WEIGHT * per_mod_kl)
             recon_items.append(recon_loss.detach().item())
-            kl_items.append(kl_loss.detach().item())
 
         avg_recon = sum(recon_items) / len(recon_items) if recon_items else 0.0
-        avg_kl    = sum(kl_items)    / len(kl_items)    if kl_items    else 0.0
+        avg_kl    = per_mod_kl.detach().item()
 
         if combo_losses:
             return torch.stack(combo_losses).mean(), avg_recon, avg_kl
