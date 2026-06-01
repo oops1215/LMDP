@@ -167,6 +167,66 @@ def evaluate_fold(model,
     return metrics
 
 
+# ─── 消融评估（快速，仅返回准确率）──────────────────────────────────────────
+
+def evaluate_ablation(model,
+                      loader,
+                      device: str,
+                      load_images: bool = True,
+                      no_mri: bool = False,
+                      no_pet: bool = False) -> float:
+    """
+    强制关闭指定模态后评估验证集准确率。
+
+    no_mri=True : 将 mod_avail[:,:,0] 置 0，MRI 编码器输出被忽略
+    no_pet=True : 将 mod_avail[:,:,1] 置 0，PET 编码器输出被忽略
+    两者同时为 True : 仅用表格特征（相当于无图像基线）
+
+    返回 accuracy (float 0-1)。
+    """
+    model.eval()
+    all_true, all_pred = [], []
+
+    with torch.no_grad():
+        for batch in loader:
+            batch_d = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                       for k, v in batch.items()}
+
+            # 移除图像张量（节省显存；avail 置 0 已足够让编码器跳过）
+            if not load_images or no_mri:
+                batch_d.pop("mri_seq", None)
+            if not load_images or no_pet:
+                batch_d.pop("pet_seq", None)
+
+            # 强制关闭对应模态可用性
+            if (no_mri or no_pet) and "mod_avail" in batch_d:
+                ma = batch_d["mod_avail"].clone()
+                if no_mri:
+                    ma[:, :, 0] = 0
+                if no_pet:
+                    ma[:, :, 1] = 0
+                batch_d["mod_avail"] = ma
+
+            out = model(batch_d, is_training=False)
+            dx_logits = out["dx_preds"]   # (B, T, C)
+            dx_seq    = batch_d["dx_seq"]
+            lengths   = batch_d["lengths"]
+            B, T, _ = dx_logits.shape
+
+            for b in range(B):
+                L = int(lengths[b].item())
+                for t in range(min(L - 1, T - 1)):
+                    label = int(dx_seq[b, t + 1].item())
+                    if label < 0:
+                        continue
+                    all_true.append(label)
+                    all_pred.append(int(dx_logits[b, t].argmax().item()))
+
+    if not all_true:
+        return 0.0
+    return float(accuracy_score(all_true, all_pred))
+
+
 # ─── 打印指标 ─────────────────────────────────────────────────────────────────
 
 def print_metrics(metrics: Dict) -> None:

@@ -43,7 +43,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import Config
 from models.lmdp_net import LMDPNet
 from dataset import build_dataloaders
-from evaluate import evaluate_fold, print_metrics
+from evaluate import evaluate_fold, evaluate_ablation, print_metrics
+
+ABLATION_INTERVAL = 10   # 每隔多少 epoch 做一次消融验证
 
 
 # ─── 单 Epoch 训练 ────────────────────────────────────────────────────────────
@@ -185,6 +187,59 @@ def _plot_contrib_all_folds(all_histories: List[List[Tuple]],
     print(f"\n[图] 全折贡献率对比图 → {path}")
 
 
+def _plot_ablation_fold(history: List[Tuple], save_dir: str, fold_idx: int) -> None:
+    """
+    消融研究折线图：对比四种模态配置的验证准确率随 epoch 变化。
+    折线间距 = 该模态对预测的真实贡献量。
+    保存到 <save_dir>/ablation_study.png
+    """
+    if not _HAS_MPL or not history:
+        return
+
+    epochs     = [h[0] for h in history]
+    acc_full   = [h[1] for h in history]
+    acc_no_mri = [h[2] for h in history]
+    acc_no_pet = [h[3] for h in history]
+    acc_no_img = [h[4] for h in history]
+
+    fig, (ax, ax_delta) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+
+    # ── 上图：绝对准确率 ────────────────────────────────────────────────
+    ax.plot(epochs, acc_full,   color="black",    linewidth=2.2, label="Full (MRI+PET+Tab)")
+    ax.plot(epochs, acc_no_mri, color="#4C72B0",  linewidth=1.8, linestyle="--", label="No MRI")
+    ax.plot(epochs, acc_no_pet, color="#DD8452",  linewidth=1.8, linestyle="--", label="No PET")
+    ax.plot(epochs, acc_no_img, color="#888888",  linewidth=1.5, linestyle=":",  label="Tab only")
+    ax.fill_between(epochs, acc_no_mri, acc_full, alpha=0.12, color="#4C72B0")
+    ax.fill_between(epochs, acc_no_pet, acc_full, alpha=0.12, color="#DD8452")
+    ax.set_ylabel("Val Accuracy", fontsize=11)
+    ax.set_title(f"Fold {fold_idx+1} — Modality Ablation Study", fontsize=12)
+    ax.legend(fontsize=10)
+    ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
+    ax.grid(linestyle="--", alpha=0.4)
+
+    # ── 下图：模态贡献增益 Δacc ─────────────────────────────────────────
+    delta_mri = [f - n for f, n in zip(acc_full, acc_no_mri)]
+    delta_pet = [f - n for f, n in zip(acc_full, acc_no_pet)]
+    delta_img = [f - n for f, n in zip(acc_full, acc_no_img)]
+    ax_delta.axhline(0, color="black", linewidth=0.8, linestyle="--")
+    ax_delta.plot(epochs, delta_mri, color="#4C72B0", linewidth=1.8, label="ΔMRI contrib")
+    ax_delta.plot(epochs, delta_pet, color="#DD8452", linewidth=1.8, label="ΔPET contrib")
+    ax_delta.plot(epochs, delta_img, color="#888888", linewidth=1.5, linestyle=":", label="ΔImage contrib")
+    ax_delta.fill_between(epochs, 0, delta_mri, alpha=0.15, color="#4C72B0")
+    ax_delta.fill_between(epochs, 0, delta_pet, alpha=0.15, color="#DD8452")
+    ax_delta.set_xlabel("Epoch", fontsize=11)
+    ax_delta.set_ylabel("Δ Accuracy (gain over ablated)", fontsize=11)
+    ax_delta.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
+    ax_delta.legend(fontsize=10)
+    ax_delta.grid(linestyle="--", alpha=0.4)
+
+    fig.tight_layout()
+    path = os.path.join(save_dir, "ablation_study.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  [图] 消融研究图 → {path}")
+
+
 # ─── 单 Fold 训练 ─────────────────────────────────────────────────────────────
 
 def train_fold(fold_idx:    int,
@@ -221,11 +276,12 @@ def train_fold(fold_idx:    int,
     optimizer = optim.Adam(model.parameters(), lr=Config.LEARNING_RATE)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
 
-    best_val_loss    = float("inf")
-    best_metrics     = {}
-    patience         = 20
-    no_improve       = 0
-    contrib_history: List[Tuple] = []
+    best_val_loss     = float("inf")
+    best_metrics      = {}
+    patience          = 20
+    no_improve        = 0
+    contrib_history:  List[Tuple] = []
+    ablation_history: List[Tuple] = []   # (epoch, acc_full, acc_no_mri, acc_no_pet, acc_no_img)
 
     ckpt_dir = os.path.join("checkpoints", f"fold{fold_idx}")
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -245,6 +301,22 @@ def train_fold(fold_idx:    int,
             train_log["contrib_pet"],
             train_log["contrib_prior"],
         ))
+
+        # ── 消融验证（每 ABLATION_INTERVAL 轮一次）──────────────────────
+        if args.load_images and epoch % ABLATION_INTERVAL == 0:
+            acc_full   = val_metrics.get("acc", 0.0)
+            acc_no_mri = evaluate_ablation(model, val_loader, device,
+                                           load_images=True, no_mri=True)
+            acc_no_pet = evaluate_ablation(model, val_loader, device,
+                                           load_images=True, no_pet=True)
+            acc_no_img = evaluate_ablation(model, val_loader, device,
+                                           load_images=True, no_mri=True, no_pet=True)
+            ablation_history.append((epoch, acc_full, acc_no_mri, acc_no_pet, acc_no_img))
+            print(f"  [消融] "
+                  f"full={acc_full:.3f}  "
+                  f"no_MRI={acc_no_mri:.3f}(Δ{acc_full-acc_no_mri:+.3f})  "
+                  f"no_PET={acc_no_pet:.3f}(Δ{acc_full-acc_no_pet:+.3f})  "
+                  f"tab_only={acc_no_img:.3f}(Δ{acc_full-acc_no_img:+.3f})")
 
         print(f"  Epoch {epoch:3d}/{Config.NUM_EPOCHS} "
               f"| loss={train_log['loss']:.4f} "
@@ -277,6 +349,7 @@ def train_fold(fold_idx:    int,
     print(f"\n  Fold {fold_idx + 1} 最佳结果:")
     print_metrics(best_metrics)
     _plot_contrib_fold(contrib_history, ckpt_dir, fold_idx)
+    _plot_ablation_fold(ablation_history, ckpt_dir, fold_idx)
     return best_metrics, contrib_history
 
 
