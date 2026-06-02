@@ -64,22 +64,22 @@ def train_epoch(model: LMDPNet,
     n_batches = 0
 
     for batch in tqdm(loader, desc="  Train", leave=False):
-        batch = _to_device(batch, device, load_images)
-        batch = _mask_current_dx(batch, Config.DX_MASK_PROB)
-
-        # 检查输入数据是否含 NaN/Inf（定位损坏样本）
-        for key in ("mri", "pet", "x"):
-            val = batch.get(key)
-            if val is not None and isinstance(val, torch.Tensor):
-                if not torch.isfinite(val).all():
-                    print(f"\n  [数据异常] batch['{key}'] 含 NaN/Inf，"
-                          f"batch_idx={n_batches}  "
-                          f"nan={torch.isnan(val).sum().item()}  "
-                          f"inf={torch.isinf(val).sum().item()}")
-
-        optimizer.zero_grad()
-
         try:
+            batch = _to_device(batch, device, load_images)
+            batch = _mask_current_dx(batch, Config.DX_MASK_PROB)
+
+            # 检查输入数据是否含 NaN/Inf（定位损坏样本）
+            for key in ("mri", "pet", "x"):
+                val = batch.get(key)
+                if val is not None and isinstance(val, torch.Tensor):
+                    if not torch.isfinite(val).all():
+                        print(f"\n  [数据异常] batch['{key}'] 含 NaN/Inf，"
+                              f"batch_idx={n_batches}  "
+                              f"nan={torch.isnan(val).sum().item()}  "
+                              f"inf={torch.isinf(val).sum().item()}")
+
+            optimizer.zero_grad()
+
             if scaler is not None:
                 with torch.amp.autocast('cuda'):
                     out = model(batch, is_training=True)
@@ -103,11 +103,13 @@ def train_epoch(model: LMDPNet,
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                 optimizer.step()
         except RuntimeError as e:
-            if "out of memory" in str(e) or "CUDA error" in str(e):
-                print(f"\n  [OOM/CUDA错误] {e}\n  释放显存后继续...")
+            err_str = str(e)
+            if "out of memory" in err_str:
+                print(f"\n  [OOM] {e}\n  释放显存后继续...")
                 torch.cuda.empty_cache()
                 optimizer.zero_grad()
                 continue
+            # CUDA context errors are unrecoverable — re-raise immediately
             raise
 
         total_loss     += loss.item()
