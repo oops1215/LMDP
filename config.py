@@ -61,7 +61,7 @@ class Config:
 
     # ─── Training ─────────────────────────────────────────────────────────────
     LEARNING_RATE = 0.002
-    BATCH_SIZE    = 6     # 2→6：RTX 2070(8GB) 实测显存仅 2.6GB，提升 batch size 以充分利用
+    BATCH_SIZE    = 2     # 保守值，WSL2 CUDA 稳定性问题下优先保证训练可运行
     NUM_EPOCHS    = 100
     K_FOLDS       = 5
     SEED          = 42

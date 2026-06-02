@@ -324,7 +324,7 @@ def train_fold(fold_idx:    int,
                            weight_decay=Config.WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
     # 混合精度：float16 激活值，显存减半（仅 CUDA 启用）
-    scaler = torch.amp.GradScaler('cuda') if device == "cuda" else None
+    scaler = None if (device != "cuda" or args.no_amp) else torch.amp.GradScaler('cuda')
 
     best_val_loss     = float("inf")
     best_metrics      = {}
@@ -444,6 +444,8 @@ def main():
                         help="过滤掉所有访次均无图像的受试者")
     parser.add_argument("--kl_warmup_epochs", type=int, default=20,
                         help="KL 权重从 0 线性增长到 --kl_weight 所需的 epoch 数（0=不做 warmup）")
+    parser.add_argument("--no_amp", action="store_true",
+                        help="禁用混合精度（AMP），用 FP32 训练，排查 CUDA 数值问题")
     args = parser.parse_args()
     args.load_images = not args.no_images
     Config.KL_WEIGHT = args.kl_weight
