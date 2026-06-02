@@ -68,21 +68,36 @@ def train_epoch(model: LMDPNet,
         batch = _mask_current_dx(batch, Config.DX_MASK_PROB)
         optimizer.zero_grad()
 
-        if scaler is not None:
-            with torch.amp.autocast('cuda'):
+        try:
+            if scaler is not None:
+                with torch.amp.autocast('cuda'):
+                    out = model(batch, is_training=True)
+                    loss = out["total_loss"]
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"\n  [警告] loss={loss.item():.4f}，跳过该 batch")
+                    scaler.update()
+                    continue
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
                 out = model(batch, is_training=True)
                 loss = out["total_loss"]
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            out = model(batch, is_training=True)
-            loss = out["total_loss"]
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            optimizer.step()
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"\n  [警告] loss={loss.item():.4f}，跳过该 batch")
+                    continue
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                optimizer.step()
+        except RuntimeError as e:
+            if "out of memory" in str(e) or "CUDA error" in str(e):
+                print(f"\n  [OOM/CUDA错误] {e}\n  释放显存后继续...")
+                torch.cuda.empty_cache()
+                optimizer.zero_grad()
+                continue
+            raise
 
         total_loss     += loss.item()
         lp_sum         += out["lp"]
@@ -323,10 +338,15 @@ def train_fold(fold_idx:    int,
             Config.KL_WEIGHT = args.kl_weight
 
         train_log = train_epoch(model, train_loader, optimizer, device, args.load_images, scaler)
+        if device == "cuda":
+            torch.cuda.empty_cache()
         val_metrics = evaluate_fold(model, val_loader, device, args.load_images)
 
         scheduler.step()
         elapsed = time.time() - t0
+        if device == "cuda":
+            mem_used = torch.cuda.memory_reserved() / 1024**3
+            mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
 
         contrib_history.append((
             epoch,
@@ -354,6 +374,7 @@ def train_fold(fold_idx:    int,
         # 格式：MRI=17.8%(↑58%有图时) 表示整体均摊贡献 vs 有 MRI 时的真实编码器信息量
         c_mri_cond = train_log.get("contrib_mri_cond", 0.0)
         c_pet_cond = train_log.get("contrib_pet_cond", 0.0)
+        mem_str = f" GPU={mem_used:.1f}/{mem_total:.0f}GB" if device == "cuda" else ""
         print(f"  Epoch {epoch:3d}/{Config.NUM_EPOCHS} "
               f"| loss={train_log['loss']:.4f} "
               f"lp={train_log['lp']:.4f} "
@@ -365,7 +386,7 @@ def train_fold(fold_idx:    int,
               f"prior={train_log['contrib_prior']:.1%} "
               f"| val_acc={val_metrics.get('acc', 0):.4f} "
               f"mAUC={val_metrics.get('mauc', 0):.4f} "
-              f"| {elapsed:.1f}s")
+              f"| {elapsed:.1f}s{mem_str}")
 
         # 早停与模型保存
         val_loss = val_metrics.get("val_loss", float("inf"))
