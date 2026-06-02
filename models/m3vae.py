@@ -14,6 +14,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as ckpt
 from typing import Optional, Tuple
 
 import sys, os
@@ -104,7 +105,9 @@ class ImageDecoder3D(nn.Module):
         """
         h = self.fc(z)
         h = h.view(h.size(0), *self.init_shape)
-        return self.decoder(h)
+        # Gradient checkpointing: don't store intermediate activations during
+        # forward; recompute during backward. Halves decoder memory at ~1.33x compute.
+        return ckpt.checkpoint(self.decoder, h, use_reentrant=False)
 
 
 # ─── Product of Experts 融合 ──────────────────────────────────────────────────
