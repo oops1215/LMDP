@@ -141,7 +141,7 @@ def product_of_experts(mu_list: list,
     for c in range(C):
         # mask[:, c]: (B,) → (B, 1) 广播
         m_c = mask[:, c].unsqueeze(1)                      # (B, 1)
-        T_c = torch.exp(-logvar_list[c])                   # 精度 (B, latent_dim)
+        T_c = torch.exp(-logvar_list[c].clamp(-10.0, 10.0))  # 精度 (B, latent_dim)
         T_sum   = T_sum   + T_c * m_c
         Tmu_sum = Tmu_sum + mu_list[c] * T_c * m_c
 

@@ -66,6 +66,17 @@ def train_epoch(model: LMDPNet,
     for batch in tqdm(loader, desc="  Train", leave=False):
         batch = _to_device(batch, device, load_images)
         batch = _mask_current_dx(batch, Config.DX_MASK_PROB)
+
+        # 检查输入数据是否含 NaN/Inf（定位损坏样本）
+        for key in ("mri", "pet", "x"):
+            val = batch.get(key)
+            if val is not None and isinstance(val, torch.Tensor):
+                if not torch.isfinite(val).all():
+                    print(f"\n  [数据异常] batch['{key}'] 含 NaN/Inf，"
+                          f"batch_idx={n_batches}  "
+                          f"nan={torch.isnan(val).sum().item()}  "
+                          f"inf={torch.isinf(val).sum().item()}")
+
         optimizer.zero_grad()
 
         try:
