@@ -299,7 +299,7 @@ class LMDPNet(nn.Module):
         """
         losses = []
 
-        for t in range(T):
+        for t in range(1, T):   # t=0 时 h_{-1}=0，无历史信息，跳过
             x_pred_t = x_pred_list[t]                           # (B, biomarker_dim) 已是 6D
             x_true_t = non_img_seq[:, t, :self.biomarker_dim]   # (B, 6)
             mask_t   = bio_mask[:, t, :]                         # (B, 6)
