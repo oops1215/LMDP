@@ -219,8 +219,9 @@ class M3VAE(nn.Module):
     # ── KL 散度（论文 eq.30）─────────────────────────────────────────────────
     @staticmethod
     def kl_divergence(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        """KL(N(μ,σ) || N(0,I)) = 0.5 * Σ(μ² + σ² - logσ² - 1)"""
-        return 0.5 * torch.sum(mu.pow(2) + logvar.exp() - logvar - 1, dim=-1)
+        """KL(N(μ,σ) || N(0,I)) per sample, averaged over latent dims.
+        Using mean (not sum) keeps scale independent of latent_dim=256."""
+        return 0.5 * torch.mean(mu.pow(2) + logvar.exp() - logvar - 1, dim=-1)
 
     # ── 模态贡献率（基于 PoE 精度权重，仅用于日志）────────────────────────
     @staticmethod
