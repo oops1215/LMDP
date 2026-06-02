@@ -515,6 +515,10 @@ def _to_device(batch: dict, device: str, load_images: bool) -> dict:
     if not load_images:
         result.pop("mri_seq", None)
         result.pop("pet_seq", None)
+        # Zero out image availability so _encode_modality treats all samples
+        # as image-free; prevents phantom contributions from logvar=0 default.
+        if "mod_avail" in result:
+            result["mod_avail"] = torch.zeros_like(result["mod_avail"])
     return result
 
 
