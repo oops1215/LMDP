@@ -121,28 +121,26 @@ print("=" * 60)
 print("3. 受试者级别图像分布（用于评估过滤策略）")
 print("=" * 60)
 
-subj_has_image = 0
-subj_no_image  = 0
-visits_kept = 0
-visits_removed = 0
+from collections import Counter
+img_visit_counts = Counter()
 
 for ptid in subjects:
     visits = subject_dict[ptid]['visits']
-    has_any_image = any(
-        v.get('mri_path') is not None or v.get('pet_path') is not None
-        for v in visits
+    n_img_visits = sum(
+        1 for v in visits
+        if v.get('mri_path') is not None or v.get('pet_path') is not None
     )
-    if has_any_image:
-        subj_has_image += 1
-        visits_kept += len(visits)
-    else:
-        subj_no_image += 1
-        visits_removed += len(visits)
+    img_visit_counts[n_img_visits] += 1
 
 total_subj = len(subjects)
-total_vis  = visits_kept + visits_removed
-print(f"有至少一张图像的受试者: {subj_has_image} / {total_subj} = {100*subj_has_image/total_subj:.1f}%")
-print(f"完全无图像的受试者:     {subj_no_image} / {total_subj} = {100*subj_no_image/total_subj:.1f}%")
+kept_ge2   = sum(cnt for n, cnt in img_visit_counts.items() if n >= 2)
+kept_ge1   = sum(cnt for n, cnt in img_visit_counts.items() if n >= 1)
+removed    = img_visit_counts[0]
+only_one   = img_visit_counts[1]
+
+print(f"图像访视数分布（受试者数）：")
+for n in sorted(img_visit_counts):
+    print(f"  {n:2d} 次有图像访视: {img_visit_counts[n]:4d} 人")
 print()
-print(f"过滤后保留访次: {visits_kept} / {total_vis} = {100*visits_kept/total_vis:.1f}%")
-print(f"过滤后删除访次: {visits_removed} / {total_vis} = {100*visits_removed/total_vis:.1f}%")
+print(f"图像访视 ≥1（旧过滤）: 保留 {kept_ge1:4d} / {total_subj}，删除 {removed:4d} 人")
+print(f"图像访视 ≥2（新过滤）: 保留 {kept_ge2:4d} / {total_subj}，额外删除 {only_one:4d} 人（仅1次图像访视）")

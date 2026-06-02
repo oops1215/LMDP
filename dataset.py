@@ -240,9 +240,9 @@ def build_dataloaders(processed_data_path: str = Config.TAB_PROCESSED_PATH,
     if filter_no_image:
         before = len(all_ptids)
         all_ptids = [p for p in all_ptids
-                     if any(v.get("mri_path") is not None or v.get("pet_path") is not None
-                            for v in subject_data[p]["visits"])]
-        print(f"filter_no_image: {before} → {len(all_ptids)} 受试者（删除 {before - len(all_ptids)} 个全无图像受试者）")
+                     if sum(1 for v in subject_data[p]["visits"]
+                            if v.get("mri_path") is not None or v.get("pet_path") is not None) >= 2]
+        print(f"filter_no_image: {before} → {len(all_ptids)} 受试者（删除 {before - len(all_ptids)} 个图像访视 <2 的受试者）")
     np.random.shuffle(all_ptids)
 
     # 5-fold split
