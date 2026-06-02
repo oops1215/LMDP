@@ -147,7 +147,7 @@ def product_of_experts(mu_list: list,
 
     # fused σ² = 1 / T_sum
     fused_var    = 1.0 / T_sum.clamp(min=1e-8)
-    fused_logvar = torch.log(fused_var.clamp(min=1e-8))   # log(σ²_fused)
+    fused_logvar = torch.log(fused_var.clamp(min=1e-8)).clamp(-10.0, 10.0)  # log(σ²_fused)
     fused_mu     = Tmu_sum * fused_var                    # (B, latent_dim)
 
     return fused_mu, fused_logvar
