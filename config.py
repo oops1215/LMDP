@@ -53,7 +53,7 @@ class Config:
 
     # ─── Model hyperparameters ────────────────────────────────────────────────
     LATENT_DIM  = 256   # M3VAE latent dimension
-    HIDDEN_DIM  = 128   # LSTM hidden state size (best per Table X)
+    HIDDEN_DIM  = 256   # LSTM hidden state size (128→256：显存充裕，提升表达能力)
     IMG_CNN_CHANNELS = [32, 64, 128, 256, 256]  # 3D CNN channels
 
     # LSTM input = fused_mu (LATENT_DIM) + non_img (NON_IMG_DIM)
@@ -61,7 +61,7 @@ class Config:
 
     # ─── Training ─────────────────────────────────────────────────────────────
     LEARNING_RATE = 0.002
-    BATCH_SIZE    = 2     # 4→2：3D 图像批次占显存过大，RTX 2070(8GB) 需降低
+    BATCH_SIZE    = 6     # 2→6：RTX 2070(8GB) 实测显存仅 2.6GB，提升 batch size 以充分利用
     NUM_EPOCHS    = 100
     K_FOLDS       = 5
     SEED          = 42
