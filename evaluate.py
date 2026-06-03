@@ -99,6 +99,10 @@ def evaluate_fold(model,
     model.eval()
     all_true, all_pred, all_prob = [], [], []
     all_bio_true, all_bio_pred, all_bio_mask = [], [], []
+    # step-stratified: step_true[t] = labels for predictions made from history of length t
+    step_true: dict = {}
+    step_pred: dict = {}
+    step_prob: dict = {}
     total_loss = 0.0
     n_batches  = 0
 
@@ -136,6 +140,10 @@ def evaluate_fold(model,
                     all_true.append(label)
                     all_pred.append(pred)
                     all_prob.append(prob)
+                    # t = number of prior visits seen before this prediction
+                    step_true.setdefault(t, []).append(label)
+                    step_pred.setdefault(t, []).append(pred)
+                    step_prob.setdefault(t, []).append(prob)
 
                 # 生物标志物插补评估（仅对实测值）
                 for t in range(min(L, T)):
@@ -149,13 +157,25 @@ def evaluate_fold(model,
 
     metrics = {"val_loss": total_loss / max(n_batches, 1)}
 
-    # 诊断预测指标
+    # 诊断预测指标（全步混合）
     if all_true:
         y_true = np.array(all_true)
         y_pred = np.array(all_pred)
         y_prob = np.array(all_prob)
         cls_metrics = compute_classification_metrics(y_true, y_pred, y_prob)
         metrics.update(cls_metrics)
+
+    # 按步数分层指标（t=0 表示只有基线，t=k 表示有 k 次历史访视）
+    step_metrics = {}
+    for t in sorted(step_true.keys()):
+        yt = np.array(step_true[t])
+        yp = np.array(step_pred[t])
+        ypr = np.array(step_prob[t])
+        if len(np.unique(yt)) < 2:
+            continue
+        sm = compute_classification_metrics(yt, yp, ypr)
+        step_metrics[t] = {"n": len(yt), "acc": sm["acc"], "mAUC": sm["mAUC"]}
+    metrics["step_metrics"] = step_metrics
 
     # 生物标志物插补指标
     if all_bio_true:

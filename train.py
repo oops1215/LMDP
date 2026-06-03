@@ -388,6 +388,10 @@ def train_fold(fold_idx:    int,
         c_mri_cond = train_log.get("contrib_mri_cond", 0.0)
         c_pet_cond = train_log.get("contrib_pet_cond", 0.0)
         mem_str = f" GPU={mem_used:.1f}/{mem_total:.0f}GB" if device == "cuda" else ""
+        step_str = ""
+        for t, sm in sorted(val_metrics.get("step_metrics", {}).items()):
+            step_str += f" t{t}:{sm['acc']:.3f}(n={sm['n']})"
+
         print(f"  Epoch {epoch:3d}/{Config.NUM_EPOCHS} "
               f"| loss={train_log['loss']:.4f} "
               f"lp={train_log['lp']:.4f} "
@@ -399,6 +403,7 @@ def train_fold(fold_idx:    int,
               f"prior={train_log['contrib_prior']:.1%} "
               f"| val_acc={val_metrics.get('acc', 0):.4f} "
               f"mAUC={val_metrics.get('mauc', 0):.4f} "
+              f"| steps:{step_str}"
               f"| {elapsed:.1f}s{mem_str}")
 
         # 早停与模型保存
