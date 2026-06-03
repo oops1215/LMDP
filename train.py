@@ -145,7 +145,7 @@ def train_epoch(model: LMDPNet,
 
 def _plot_contrib_fold(history: List[Tuple], save_dir: str, fold_idx: int) -> None:
     """
-    单折堆叠面积图：x=epoch，y=贡献率，三层分别为 MRI / PET / Prior。
+    左：堆叠面积图（随 epoch 变化）；右：最终 epoch 柱状图。
     保存到 <save_dir>/contrib_rates.png
     """
     if not _HAS_MPL or not history:
@@ -156,21 +156,37 @@ def _plot_contrib_fold(history: List[Tuple], save_dir: str, fold_idx: int) -> No
     c_pet   = np.array([h[2] for h in history])
     c_prior = np.array([h[3] for h in history])
 
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.stackplot(epochs, c_mri, c_pet, c_prior,
-                 labels=["MRI", "PET", "Prior  N(0,I)"],
-                 colors=["#4C72B0", "#DD8452", "#AAAAAA"],
-                 alpha=0.85)
-    ax.set_xlim(epochs[0], epochs[-1])
-    ax.set_ylim(0, 1)
-    ax.set_xlabel("Epoch", fontsize=12)
-    ax.set_ylabel("Contribution Rate", fontsize=12)
-    ax.set_title(
-        f"Fold {fold_idx + 1} — Modality Contribution Rates  (PoE precision weighting)",
-        fontsize=12)
-    ax.legend(loc="upper right", fontsize=10)
-    ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
-    ax.grid(axis='y', linestyle='--', alpha=0.4)
+    colors = ["#4C72B0", "#DD8452", "#AAAAAA"]
+    labels = ["MRI", "PET", "Prior N(0,I)"]
+
+    fig, (ax_area, ax_bar) = plt.subplots(1, 2, figsize=(13, 4),
+                                           gridspec_kw={"width_ratios": [3, 1]})
+
+    # ── 左：面积图 ────────────────────────────────────────────────────────────
+    ax_area.stackplot(epochs, c_mri, c_pet, c_prior,
+                      labels=labels, colors=colors, alpha=0.85)
+    ax_area.set_xlim(epochs[0], epochs[-1])
+    ax_area.set_ylim(0, 1)
+    ax_area.set_xlabel("Epoch", fontsize=12)
+    ax_area.set_ylabel("Contribution Rate", fontsize=12)
+    ax_area.set_title(
+        f"Fold {fold_idx + 1} — Modality Contribution Rates (PoE)", fontsize=12)
+    ax_area.legend(loc="upper right", fontsize=10)
+    ax_area.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
+    ax_area.grid(axis='y', linestyle='--', alpha=0.4)
+
+    # ── 右：最终 epoch 柱状图 ─────────────────────────────────────────────────
+    final_vals = [c_mri[-1], c_pet[-1], c_prior[-1]]
+    bars = ax_bar.bar(labels, final_vals, color=colors, alpha=0.85, width=0.5)
+    for bar, val in zip(bars, final_vals):
+        ax_bar.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+                    f"{val:.1%}", ha="center", va="bottom", fontsize=11, fontweight="bold")
+    ax_bar.set_ylim(0, 1)
+    ax_bar.set_ylabel("Contribution Rate", fontsize=12)
+    ax_bar.set_title(f"Final (Epoch {epochs[-1]})", fontsize=12)
+    ax_bar.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
+    ax_bar.grid(axis='y', linestyle='--', alpha=0.4)
+
     fig.tight_layout()
 
     path = os.path.join(save_dir, "contrib_rates.png")
@@ -328,7 +344,7 @@ def train_fold(fold_idx:    int,
     # 混合精度：float16 激活值，显存减半（仅 CUDA 启用）
     scaler = None if (device != "cuda" or args.no_amp) else torch.amp.GradScaler('cuda')
 
-    best_val_loss     = float("inf")
+    best_mauc         = -float("inf")
     best_metrics      = {}
     patience          = 20
     no_improve        = 0
@@ -406,12 +422,12 @@ def train_fold(fold_idx:    int,
               f"| steps:{step_str}"
               f"| {elapsed:.1f}s{mem_str}")
 
-        # 早停与模型保存
-        val_loss = val_metrics.get("val_loss", float("inf"))
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_metrics  = val_metrics
-            no_improve    = 0
+        # 早停与模型保存（以 mAUC 为准）
+        cur_mauc = val_metrics.get("mauc", -float("inf"))
+        if cur_mauc > best_mauc:
+            best_mauc    = cur_mauc
+            best_metrics = val_metrics
+            no_improve   = 0
             torch.save({
                 "epoch"     : epoch,
                 "model_state": model.state_dict(),
