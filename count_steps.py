@@ -6,9 +6,12 @@ import pickle, collections
 from config import Config
 
 with open(Config.TAB_PROCESSED_PATH, "rb") as f:
-    data = pickle.load(f)
+    raw = pickle.load(f)
 
-all_ptids = list(data.keys())
+# 支持两种结构：直接 {ptid: {...}} 或 {'subjects': {ptid: {...}}, ...}
+subject_data = raw["subjects"] if "subjects" in raw else raw
+
+all_ptids = list(subject_data.keys())
 total_subjects = len(all_ptids)
 
 # 各序列长度分布
@@ -20,7 +23,7 @@ step_mri = collections.Counter()
 step_pet = collections.Counter()
 
 for ptid in all_ptids:
-    visits = data[ptid]["visits"][:Config.MAX_SEQ_LEN]
+    visits = subject_data[ptid]["visits"][:Config.MAX_SEQ_LEN]
     T = len(visits)
     len_counter[T] += 1
     for t in range(T - 1):   # t→t+1 预测对
@@ -46,12 +49,12 @@ for t in sorted(step_counter):
 # filter_no_image 后的情况
 has_any_img = [p for p in all_ptids
                if any(v["mri_path"] or v["pet_path"]
-                      for v in data[p]["visits"])]
+                      for v in subject_data[p]["visits"])]
 print(f"\n--filter_no_image 后: {len(has_any_img)} 人（删除 {total_subjects-len(has_any_img)} 人）")
 
 step_c2 = collections.Counter()
 for ptid in has_any_img:
-    visits = data[ptid]["visits"][:Config.MAX_SEQ_LEN]
+    visits = subject_data[ptid]["visits"][:Config.MAX_SEQ_LEN]
     for t in range(len(visits) - 1):
         step_c2[t] += 1
 
