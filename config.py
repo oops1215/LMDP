@@ -69,9 +69,11 @@ class Config:
     DX_MASK_PROB  = 0.5  # probability of masking current-visit diagnosis during training
 
     # KL weight in VAE loss (β-VAE).
-    # At init, KL term (~24.7) is ~500x larger than recon (~0.05),
-    # causing posterior collapse. β=0.001 rebalances so reconstruction dominates.
     KL_WEIGHT     = 0.001
+    # Free bits per latent dim: prevents KL from collapsing to 0 by clamping
+    # per-dim KL to at least this value before averaging. When KL < FREE_BITS,
+    # the gradient to the encoder is zeroed out (no pressure to collapse further).
+    FREE_BITS     = 0.5
 
     WEIGHT_DECAY  = 1e-4   # L2 regularization in Adam
     DROPOUT       = 0.3    # dropout before prediction heads

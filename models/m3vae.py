@@ -219,9 +219,15 @@ class M3VAE(nn.Module):
     # ── KL 散度（论文 eq.30）─────────────────────────────────────────────────
     @staticmethod
     def kl_divergence(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        """KL(N(μ,σ) || N(0,I)) per sample, averaged over latent dims.
-        Using mean (not sum) keeps scale independent of latent_dim=256."""
-        return 0.5 * torch.mean(mu.pow(2) + logvar.exp() - logvar - 1, dim=-1)
+        """KL(N(μ,σ) || N(0,I)) per sample with free-bits regularization.
+
+        Per-dim KL is clamped to FREE_BITS before averaging so the encoder
+        never receives a gradient pushing it further toward the prior once
+        each dim is already below the free-bits threshold. This prevents
+        posterior collapse while still allowing low-entropy dims to exist."""
+        kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - logvar - 1)  # (B, D)
+        kl_per_dim = kl_per_dim.clamp(min=Config.FREE_BITS)
+        return kl_per_dim.mean(dim=-1)  # (B,)
 
     # ── 模态贡献率（基于 PoE 精度权重，仅用于日志）────────────────────────
     @staticmethod
