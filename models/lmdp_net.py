@@ -226,8 +226,8 @@ class LMDPNet(nn.Module):
         # L_f：VAE 损失（论文 eq.29 中的 L_f）
         lf = torch.stack(vae_losses).mean() if vae_losses else torch.tensor(0.0, device=device)
 
-        # L_total = L_p + L_i + L_f（论文 eq.27，等权重）
-        total = lp + li + lf
+        # L_total = L_p + L_i + LF_WEIGHT * L_f
+        total = lp + li + Config.LF_WEIGHT * lf
 
         # 各模态平均贡献率（跨时间步平均，contribs 为 5 元组）
         if all_contribs:

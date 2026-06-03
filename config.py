@@ -77,6 +77,7 @@ class Config:
 
     WEIGHT_DECAY  = 5e-4   # L2 regularization in Adam
     DROPOUT       = 0.5    # dropout before prediction heads
+    LF_WEIGHT     = 1.0    # scale factor for VAE loss in total = lp + li + LF_WEIGHT*lf
 
     # ─── Hardware ─────────────────────────────────────────────────────────────
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

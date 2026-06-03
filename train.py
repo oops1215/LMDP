@@ -470,9 +470,13 @@ def main():
                         help="KL 权重从 0 线性增长到 --kl_weight 所需的 epoch 数（0=不做 warmup）")
     parser.add_argument("--no_amp", action="store_true",
                         help="禁用混合精度（AMP），用 FP32 训练，排查 CUDA 数值问题")
+    parser.add_argument("--lf_weight", type=float, default=Config.LF_WEIGHT,
+                        help="VAE 损失的缩放权重（total = lp + li + lf_weight*lf），默认 1.0；"
+                             "建议 5~10 以防止 VAE 后验坍塌")
     args = parser.parse_args()
     args.load_images = not args.no_images
     Config.KL_WEIGHT = args.kl_weight
+    Config.LF_WEIGHT = args.lf_weight
 
     torch.manual_seed(Config.SEED)
     np.random.seed(Config.SEED)
