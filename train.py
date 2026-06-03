@@ -340,7 +340,8 @@ def train_fold(fold_idx:    int,
     optimizer = optim.Adam(model.parameters(),
                            lr=Config.LEARNING_RATE,
                            weight_decay=Config.WEIGHT_DECAY)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=Config.NUM_EPOCHS, eta_min=1e-5)
     # 混合精度：float16 激活值，显存减半（仅 CUDA 启用）
     scaler = None if (device != "cuda" or args.no_amp) else torch.amp.GradScaler('cuda')
 

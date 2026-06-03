@@ -75,8 +75,8 @@ class Config:
     # the gradient to the encoder is zeroed out (no pressure to collapse further).
     FREE_BITS     = 0.5
 
-    WEIGHT_DECAY  = 1e-4   # L2 regularization in Adam
-    DROPOUT       = 0.3    # dropout before prediction heads
+    WEIGHT_DECAY  = 5e-4   # L2 regularization in Adam
+    DROPOUT       = 0.5    # dropout before prediction heads
 
     # ─── Hardware ─────────────────────────────────────────────────────────────
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
