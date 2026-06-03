@@ -174,7 +174,7 @@ def evaluate_fold(model,
         if len(np.unique(yt)) < 2:
             continue
         sm = compute_classification_metrics(yt, yp, ypr)
-        step_metrics[t] = {"n": len(yt), "acc": sm["acc"], "mAUC": sm["mAUC"]}
+        step_metrics[t] = {"n": len(yt), "acc": sm["acc"], "mAUC": sm["mauc"]}
     metrics["step_metrics"] = step_metrics
 
     # 生物标志物插补指标
