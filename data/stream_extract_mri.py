@@ -155,6 +155,63 @@ def organize_from_zip(zip_path: str, csv_path: str, out_dir: str) -> None:
     print(f"文件数:   {len(list(Path(out_dir).glob('*.nii*')))}")
 
 
+def organize_by_date(src_dir: str, csv_path: str, out_dir: str,
+                     move: bool = False) -> None:
+    """
+    按 PTID + 检查日期匹配，处理 Image ID 不在下载清单里的文件。
+
+    匹配逻辑：
+      CSV 的 EXAMDATE 列（YYYY-MM-DD）与文件路径中的日期目录匹配。
+      同一 PTID+日期只保留第一个匹配文件。
+    """
+    dl = pd.read_csv(csv_path)
+    dl["EXAMDATE"] = pd.to_datetime(dl["EXAMDATE"], errors="coerce").dt.strftime("%Y-%m-%d")
+    dl = dl.dropna(subset=["PTID", "VISCODE", "EXAMDATE"])
+    # 构建 (PTID, EXAMDATE) → VISCODE 映射
+    date_map = {}
+    for _, row in dl.iterrows():
+        key = (str(row["PTID"]), str(row["EXAMDATE"]))
+        if key not in date_map:
+            date_map[key] = str(row["VISCODE"])
+
+    os.makedirs(out_dir, exist_ok=True)
+    all_nii = sorted(
+        [str(p) for p in Path(src_dir).rglob("*.nii")] +
+        [str(p) for p in Path(src_dir).rglob("*.nii.gz")]
+    )
+    print(f"找到 {len(all_nii)} 个 NIfTI 文件（按日期匹配模式）")
+
+    moved = skipped = no_match = already_exists = 0
+    for filepath in tqdm(all_nii, desc="整理中"):
+        ptid = re.search(r"(\d{3}_S_\d{4})", filepath)
+        date = re.search(r"(\d{4}-\d{2}-\d{2})", filepath)
+        if not ptid or not date:
+            no_match += 1
+            continue
+        ptid, date = ptid.group(1), date.group(1)
+        viscode = date_map.get((ptid, date))
+        if viscode is None:
+            no_match += 1
+            continue
+
+        ext      = ".nii.gz" if filepath.endswith(".nii.gz") else ".nii"
+        out_name = f"{ptid}_{viscode}{ext}"
+        out_path = os.path.join(out_dir, out_name)
+
+        if os.path.exists(out_path):
+            already_exists += 1
+            continue
+
+        if move:
+            shutil.move(filepath, out_path)
+            moved += 1
+        else:
+            shutil.copy2(filepath, out_path)
+            moved += 1
+
+    print(f"\n移动: {moved}  |  已存在(跳过): {already_exists}  |  无法匹配: {no_match}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="ADNI MRI 流式提取与整理工具",
@@ -173,6 +230,13 @@ if __name__ == "__main__":
     p1.add_argument("--move", action="store_true",
                     help="移动文件（节省空间）而非复制")
 
+    # ── organize_by_date：按日期匹配（Image ID 不在清单时的备用方案）─────────
+    p3 = sub.add_parser("organize_by_date", help="按 PTID+日期匹配（Image ID 不在清单时使用）")
+    p3.add_argument("--src_dir", required=True)
+    p3.add_argument("--csv", default="data/mri_download_list.csv")
+    p3.add_argument("--out_dir", required=True)
+    p3.add_argument("--move", action="store_true", help="移动文件而非复制")
+
     # ── from_zip：流式解压 ────────────────────────────────────────────────────
     p2 = sub.add_parser("from_zip", help="流式从 zip 提取（最小临时磁盘占用）")
     p2.add_argument("--zip", required=True, help="ADNI zip 文件路径")
@@ -185,5 +249,7 @@ if __name__ == "__main__":
         organize_from_dir(args.src_dir, args.csv, args.out_dir, move=args.move)
     elif args.cmd == "from_zip":
         organize_from_zip(args.zip, args.csv, args.out_dir)
+    elif args.cmd == "organize_by_date":
+        organize_by_date(args.src_dir, args.csv, args.out_dir, move=args.move)
     else:
         parser.print_help()
