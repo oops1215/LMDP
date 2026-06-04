@@ -50,12 +50,36 @@ ABLATION_INTERVAL = 10   # 每隔多少 epoch 做一次消融验证
 
 # ─── 单 Epoch 训练 ────────────────────────────────────────────────────────────
 
+def _log_grad_norms(model: LMDPNet, epoch: int) -> None:
+    """每隔若干 epoch 打印各分支参数的梯度 L2 范数，用于诊断梯度流是否正常。"""
+    branches = {
+        "m3vae   ": model.m3vae,
+        "imputer ": model.imputation,
+        "irlstm  ": model.irlstm,
+        "pred_dx ": model.pred_dx,
+        "pred_bio": model.pred_bio,
+    }
+    parts = []
+    for name, module in branches.items():
+        total_sq = 0.0
+        n_params  = 0
+        for p in module.parameters():
+            if p.grad is not None:
+                total_sq += p.grad.detach().norm(2).item() ** 2
+                n_params += 1
+        norm = total_sq ** 0.5 if n_params > 0 else 0.0
+        parts.append(f"{name.strip()}={norm:.4f}")
+    print(f"\n  [梯度范数 ep{epoch}] " + "  ".join(parts))
+
+
 def train_epoch(model: LMDPNet,
                 loader,
                 optimizer: torch.optim.Optimizer,
                 device: str,
                 load_images: bool = True,
-                scaler=None) -> Dict:
+                scaler=None,
+                epoch: int = 0,
+                log_grad_every: int = 0) -> Dict:
     model.train()
     total_loss = lp_sum = li_sum = lf_sum = 0.0
     recon_sum = kl_sum = 0.0
@@ -90,6 +114,8 @@ def train_epoch(model: LMDPNet,
                     continue
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
+                if log_grad_every > 0 and n_batches == 0:
+                    _log_grad_norms(model, epoch)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                 scaler.step(optimizer)
                 scaler.update()
@@ -100,6 +126,8 @@ def train_epoch(model: LMDPNet,
                     print(f"\n  [警告] loss={loss.item():.4f}，跳过该 batch")
                     continue
                 loss.backward()
+                if log_grad_every > 0 and n_batches == 0:
+                    _log_grad_norms(model, epoch)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                 optimizer.step()
         except RuntimeError as e:
@@ -367,7 +395,8 @@ def train_fold(fold_idx:    int,
         else:
             Config.KL_WEIGHT = args.kl_weight
 
-        train_log = train_epoch(model, train_loader, optimizer, device, args.load_images, scaler)
+        train_log = train_epoch(model, train_loader, optimizer, device, args.load_images, scaler,
+                                epoch=epoch, log_grad_every=args.log_grad_every)
         if device == "cuda":
             torch.cuda.empty_cache()
         val_metrics = evaluate_fold(model, val_loader, device, args.load_images)
@@ -473,6 +502,8 @@ def main():
     parser.add_argument("--lf_weight", type=float, default=Config.LF_WEIGHT,
                         help="VAE 损失的缩放权重（total = lp + li + lf_weight*lf），默认 1.0；"
                              "建议 5~10 以防止 VAE 后验坍塌")
+    parser.add_argument("--log_grad_every", type=int, default=0,
+                        help="每隔 N 个 epoch 打印各分支梯度范数（0=不打印，建议调试时设为 1）")
     args = parser.parse_args()
     args.load_images = not args.no_images
     Config.KL_WEIGHT = args.kl_weight
