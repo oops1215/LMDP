@@ -84,20 +84,7 @@ def main():
             print("  方案 B：手动下载 ADNIMERGE.csv 到 data/ADNIMERGE.csv")
             sys.exit(1)
 
-    # ── 步骤 1：表格数据预处理 ───────────────────────────────────────────────
-    if not args.skip_preprocess:
-        ret = run(
-            f"python {os.path.join('data', 'preprocess_tabular.py')}",
-            "步骤 1/3：预处理 ADNIMERGE.csv 表格数据"
-        )
-        if ret != 0:
-            sys.exit(1)
-    else:
-        print("\n[跳过] 表格数据预处理")
-        if not check_file(Config.TAB_PROCESSED_PATH, "tabular_processed.pkl"):
-            sys.exit(1)
-
-    # ── 步骤 2：图像预处理 ───────────────────────────────────────────────────
+    # ── 步骤 1：图像预处理（必须在表格预处理之前，否则 pkl 中路径全为 None）────
     if not args.skip_imaging and not args.no_images:
         mri_count = len([f for f in os.listdir(Config.MRI_RAW_DIR)
                          if f.endswith((".nii", ".nii.gz"))]) \
@@ -115,7 +102,7 @@ def main():
             ret = run(
                 f"python {os.path.join('data', 'preprocess_imaging.py')} "
                 f"preprocess --transform {args.transform}",
-                "步骤 2/3：图像配准与预处理"
+                "步骤 1/3：图像配准与预处理"
             )
             if ret != 0:
                 print("  [警告] 图像预处理失败，尝试以无图像模式继续...")
@@ -123,8 +110,21 @@ def main():
     else:
         print("\n[跳过] 图像预处理")
 
+    # ── 步骤 2：表格数据预处理（在图像预处理之后，确保 pkl 中路径正确）────────
+    if not args.skip_preprocess:
+        ret = run(
+            f"python {os.path.join('data', 'preprocess_tabular.py')}",
+            "步骤 2/3：预处理 ADNIMERGE.csv 表格数据"
+        )
+        if ret != 0:
+            sys.exit(1)
+    else:
+        print("\n[跳过] 表格数据预处理")
+        if not check_file(Config.TAB_PROCESSED_PATH, "tabular_processed.pkl"):
+            sys.exit(1)
+
     # ── 步骤 3：训练 ────────────────────────────────────────────────────────
-    train_cmd = f"python train.py"
+    train_cmd = "python train.py"
     if args.no_images:
         train_cmd += " --no_images"
     if args.fold >= 0:
