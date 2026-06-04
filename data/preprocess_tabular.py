@@ -106,6 +106,19 @@ def preprocess_tabular(adnimerge_path: str = Config.ADNIMERGE_PATH,
     df = df[df["PTID"].isin(valid_ptids)].copy()
     print(f"  过滤逆转/不足2次访视后: {df['PTID'].nunique()} 人，{len(df)} 条")
 
+    # ── 4b. 排除完全没有 MRI 的受试者 ───────────────────────────────────────
+    # 没有任何 MRI 的受试者对影像编码器没有贡献，会使模型退化为纯表格模型
+    df["_key"] = df["PTID"].str.strip() + "_" + df["VISCODE"].str.strip()
+    df["_has_mri"] = df["_key"].apply(
+        lambda k: os.path.exists(os.path.join(mri_prep_dir, k + ".npy"))
+    )
+    has_any_mri = df.groupby("PTID")["_has_mri"].any()
+    ptids_with_mri = has_any_mri[has_any_mri].index
+    n_before = df["PTID"].nunique()
+    df = df[df["PTID"].isin(ptids_with_mri)].copy()
+    df = df.drop(columns=["_key", "_has_mri"])
+    print(f"  过滤无MRI受试者后: {df['PTID'].nunique()} 人（排除 {n_before - df['PTID'].nunique()} 人）")
+
     # ── 5. 年龄：只有基线年龄，后续按时间间隔递增 ───────────────────────────
     baseline_age = df[df["VISCODE"] == "bl"][["PTID", "AGE"]].set_index("PTID")["AGE"]
     def compute_age(row):
