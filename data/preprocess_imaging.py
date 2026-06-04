@@ -72,6 +72,7 @@ MNI152 模板下载（选其一）：
 import os
 import sys
 import glob
+import shutil
 import numpy as np
 import nibabel as nib
 from pathlib import Path
@@ -137,27 +138,73 @@ def get_mni152_template() -> str:
     )
 
 
+# ─── 空间一致性检测 ──────────────────────────────────────────────────────────
+
+# MNI152 标准空间的特征（nilearn icbm152_2009 模板）
+_MNI_SHAPE    = (182, 218, 182)
+_MNI_SPACING  = (1.0, 1.0, 1.0)   # mm，允许 ±0.1 误差
+_MNI_TOL      = 0.15               # mm
+
+def _check_spatial_consistency(image_path: str) -> dict:
+    """
+    检查图像的空间属性，返回诊断信息。
+
+    返回 dict 包含：
+      already_mni  : bool  - 图像形状/间距是否已在 MNI152 空间
+      spacing      : tuple - 体素大小 (x,y,z) mm
+      shape        : tuple - 图像形状
+      orientation  : str   - 坐标轴朝向（nibabel axcodes）
+      warnings     : list  - 潜在问题描述
+    """
+    img  = nib.load(image_path)
+    hdr  = img.header
+    shape     = tuple(int(d) for d in img.shape[:3])
+    spacing   = tuple(float(v) for v in hdr.get_zooms()[:3])
+    axcodes   = nib.aff2axcodes(img.affine)
+    orient_str = "".join(axcodes)
+
+    warnings = []
+    if any(abs(s - 1.0) > _MNI_TOL for s in spacing):
+        warnings.append(f"体素大小非 1mm 各向同性: {spacing}")
+    if orient_str not in ("RAS", "LAS", "RPS"):
+        warnings.append(f"非标准朝向: {orient_str}（配准仍可处理，但值得注意）")
+
+    already_mni = (
+        shape == _MNI_SHAPE
+        and all(abs(s - r) < _MNI_TOL for s, r in zip(spacing, _MNI_SPACING))
+    )
+
+    return dict(
+        already_mni=already_mni,
+        spacing=spacing,
+        shape=shape,
+        orientation=orient_str,
+        warnings=warnings,
+    )
+
+
 # ─── ANTs 配准到 MNI152 ──────────────────────────────────────────────────────
 
 def register_to_mni152(image_path: str,
                         template_path: str,
                         type_of_transform: str = "SyN",
-                        moving_image=None) -> np.ndarray:
+                        moving_image=None,
+                        transform_cache_dir: str | None = None) -> np.ndarray:
     """
     将输入图像配准到 MNI152 空间。
-    使用 SyN（非线性）配准，等同于 SPM12 的 Normalise(Write) 步骤。
 
     参数
     ----
-    image_path        : 输入 NIfTI 文件路径（当 moving_image 为 None 时使用）
-    template_path     : MNI152 模板 NIfTI 路径
-    type_of_transform : "SyN"（推荐）或 "Affine"（速度更快）
-    moving_image      : 已加载的 ANTsImage（例如 N4 校正后的结果），
-                        若提供则忽略 image_path
+    image_path          : 输入 NIfTI 文件路径
+    template_path       : MNI152 模板 NIfTI 路径
+    type_of_transform   : "SyN" 或 "Affine"
+    moving_image        : 已加载的 ANTsImage（N4 校正后），若提供则忽略 image_path
+    transform_cache_dir : 若指定，将 ANTs 变换文件缓存到此目录；
+                          下次直接 apply_transforms 跳过配准（断点续传加速）
 
     返回
     ----
-    numpy array, shape = (182, 218, 182)，已配准的图像数据
+    numpy array, shape = (182, 218, 182)
     """
     import ants
 
@@ -167,14 +214,51 @@ def register_to_mni152(image_path: str,
     else:
         moving = ants.image_read(image_path).clone("float")
 
+    # ── 缓存变换：若已存在则直接 apply，跳过耗时的配准 ──────────────────────
+    if transform_cache_dir is not None:
+        fname_stem = Path(image_path).name.replace(".nii.gz", "").replace(".nii", "")
+        affine_cache = os.path.join(transform_cache_dir, fname_stem + "_0GenericAffine.mat")
+        warp_cache   = os.path.join(transform_cache_dir, fname_stem + "_1Warp.nii.gz")
+
+        if type_of_transform == "SyN" and os.path.exists(affine_cache) and os.path.exists(warp_cache):
+            registered = ants.apply_transforms(
+                fixed=template,
+                moving=moving,
+                transformlist=[warp_cache, affine_cache],
+            )
+            return registered.numpy()
+
+        if type_of_transform == "Affine" and os.path.exists(affine_cache):
+            registered = ants.apply_transforms(
+                fixed=template,
+                moving=moving,
+                transformlist=[affine_cache],
+            )
+            return registered.numpy()
+
+    # ── 执行配准 ────────────────────────────────────────────────────────────
     reg = ants.registration(
         fixed=template,
         moving=moving,
         type_of_transform=type_of_transform,
         verbose=False,
     )
-    registered = reg["warpedmovout"]
-    return registered.numpy()
+
+    # ── 保存变换文件到缓存 ───────────────────────────────────────────────────
+    if transform_cache_dir is not None:
+        os.makedirs(transform_cache_dir, exist_ok=True)
+        transforms = reg["fwdtransforms"]  # [warp, affine] 或 [affine]
+        for src in transforms:
+            if not os.path.exists(src):
+                continue
+            ext = ".nii.gz" if src.endswith(".nii.gz") else os.path.splitext(src)[1]
+            if "GenericAffine" in src or ext == ".mat":
+                dst = affine_cache
+            else:
+                dst = warp_cache
+            shutil.copy2(src, dst)
+
+    return reg["warpedmovout"].numpy()
 
 
 def register_pet_via_mri(pet_path: str,
@@ -245,29 +329,43 @@ def preprocess_single_image(image_path: str,
                              template_path: str,
                              output_path: str,
                              transform_type: str = "SyN",
-                             apply_n4: bool = False) -> bool:
+                             apply_n4: bool = False,
+                             transform_cache_dir: str | None = None) -> bool:
     """
     对单张 MRI 或 PET 图像执行完整预处理，保存为 .npy 文件。
     返回 True 表示成功，False 表示跳过（已存在）或出错。
 
     参数
     ----
-    apply_n4  : 是否先做 N4 偏场校正。
-                True  → 适合原始 MPRAGE（无 N3 校正）
-                False → 适合 "MPR; GradWarp; B1 Correction; N3; Scaled"（已含 N3）
+    apply_n4            : N4 偏场校正（原始 MPRAGE 用，N3-Scaled 跳过）
+    transform_cache_dir : ANTs 变换文件缓存目录，加速断点续传
     """
     if os.path.exists(output_path):
-        return True  # 已存在，跳过
+        return True
 
     try:
+        # 0. 空间一致性检测（发现异常情况时打印警告，不阻断流程）
+        info = _check_spatial_consistency(image_path)
+        for w in info["warnings"]:
+            print(f"  [警告] {os.path.basename(image_path)}: {w}")
+
         # 1. [可选] N4 偏场校正
         moving_image = None
         if apply_n4:
             moving_image = apply_n4_bias_correction(image_path)
 
         # 2. 配准到 MNI152
-        registered = register_to_mni152(image_path, template_path, transform_type,
-                                         moving_image=moving_image)
+        #    已在 MNI 空间（形状+间距匹配）时用 Affine 微校正，避免 SyN 过度形变
+        effective_transform = transform_type
+        if info["already_mni"] and transform_type == "SyN":
+            effective_transform = "Affine"
+
+        registered = register_to_mni152(
+            image_path, template_path, effective_transform,
+            moving_image=moving_image,
+            transform_cache_dir=transform_cache_dir,
+        )
+
         # 3. 裁剪
         cropped = crop_image(registered)
         assert cropped.shape == Config.TARGET_SHAPE, \
@@ -311,7 +409,8 @@ def preprocess_all(mri_raw_dir: str   = Config.MRI_RAW_DIR,
                    transform_type: str = "SyN",
                    pet_use_mri_ref: bool = False,
                    apply_n4: bool = False,
-                   delete_source: bool = False) -> None:
+                   delete_source: bool = False,
+                   transform_cache_dir: str | None = None) -> None:
     """
     批量预处理所有 MRI 和 PET 图像。
 
@@ -321,10 +420,12 @@ def preprocess_all(mri_raw_dir: str   = Config.MRI_RAW_DIR,
     pet_raw_dir      : 原始 PET NIfTI 文件目录
     mri_out_dir      : 预处理后 MRI .npy 文件输出目录
     pet_out_dir      : 预处理后 PET .npy 文件输出目录
-    transform_type   : "SyN"（精度高，慢）或 "Affine"（速度快，精度略低）
-    pet_use_mri_ref  : True = PET 先对齐到 MRI 再到 MNI（适合未 co-reg 的 PET）
-    apply_n4         : True = 对 MRI 做 N4 偏场校正（适合原始 MPRAGE，无 N3 校正）
-                       False（默认）= 跳过，适合 "MPR; GradWarp; B1 Correction; N3; Scaled"
+    transform_type      : "SyN"（精度高，慢）或 "Affine"（速度快，精度略低）
+    pet_use_mri_ref     : True = PET 先对齐到 MRI 再到 MNI（适合未 co-reg 的 PET）
+    apply_n4            : True = 对 MRI 做 N4 偏场校正（适合原始 MPRAGE，无 N3 校正）
+                          False（默认）= 跳过，适合 "MPR; GradWarp; B1 Correction; N3; Scaled"
+    transform_cache_dir : ANTs 变换文件缓存目录（如 data/mri_transforms）；
+                          中断重启后直接复用，跳过耗时配准步骤
     """
     os.makedirs(mri_out_dir, exist_ok=True)
     os.makedirs(pet_out_dir, exist_ok=True)
@@ -345,7 +446,8 @@ def preprocess_all(mri_raw_dir: str   = Config.MRI_RAW_DIR,
         fname  = os.path.splitext(os.path.basename(mri_path))[0].replace(".nii", "")
         outpath = os.path.join(mri_out_dir, fname + ".npy")
         ok = preprocess_single_image(mri_path, template_path, outpath,
-                                      transform_type, apply_n4=apply_n4)
+                                      transform_type, apply_n4=apply_n4,
+                                      transform_cache_dir=transform_cache_dir)
         if ok:
             mri_ok += 1
             if delete_source and os.path.exists(mri_path):
@@ -365,22 +467,20 @@ def preprocess_all(mri_raw_dir: str   = Config.MRI_RAW_DIR,
         outpath = os.path.join(pet_out_dir, fname + ".npy")
 
         if pet_use_mri_ref:
-            # 找对应的 MRI 文件
             mri_ref = os.path.join(mri_raw_dir, os.path.basename(pet_path))
             if not os.path.exists(mri_ref):
-                # 尝试 .nii 后缀
                 mri_ref = mri_ref.replace(".nii.gz", ".nii")
             if os.path.exists(mri_ref):
                 ok = preprocess_pet_with_mri_reference(
                     pet_path, mri_ref, template_path, outpath)
             else:
-                # 没有对应 MRI，直接配准到 MNI152
                 ok = preprocess_single_image(
-                    pet_path, template_path, outpath, transform_type)
+                    pet_path, template_path, outpath, transform_type,
+                    transform_cache_dir=transform_cache_dir)
         else:
-            # ADNI Co-registered PET：直接配准到 MNI152（PET 无需 N4）
             ok = preprocess_single_image(
-                pet_path, template_path, outpath, transform_type)
+                pet_path, template_path, outpath, transform_type,
+                transform_cache_dir=transform_cache_dir)
 
         if ok:
             pet_ok += 1
@@ -530,6 +630,9 @@ if __name__ == "__main__":
                        help="对 MRI 做 N4 偏场校正（原始 MPRAGE 使用，N3-Scaled 无需）")
     p_pre.add_argument("--delete_source", action="store_true",
                        help="每张图预处理成功后删除原始 NIfTI（节省磁盘，适合存储紧张时）")
+    p_pre.add_argument("--transform_cache", default=None,
+                       help="ANTs 变换文件缓存目录（如 data/mri_transforms）；"
+                            "中断后重启可跳过已配准图像的 ANTs 步骤")
 
     args = parser.parse_args()
 
@@ -550,6 +653,7 @@ if __name__ == "__main__":
             pet_use_mri_ref=args.pet_mri_ref,
             apply_n4=args.n4,
             delete_source=args.delete_source,
+            transform_cache_dir=args.transform_cache,
         )
     else:
         parser.print_help()
