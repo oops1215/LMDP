@@ -334,7 +334,9 @@ class M3VAE(nn.Module):
         else:
             avg_recon_loss = next(self.mri_decoder.parameters()).sum() * 0.0
 
-        total = avg_recon_loss + Config.KL_WEIGHT * kl_reg
+        # RECON_WEIGHT 放大重建损失，使 encoder 被迫在 z 中保留图像信息
+        # 不加权时 rec≈0.009 远小于 lp≈0.8，encoder 几乎感受不到重建梯度
+        total = Config.RECON_WEIGHT * avg_recon_loss + Config.KL_WEIGHT * kl_reg
         return total, avg_recon_loss.detach().item(), kl_reg.detach().item()
 
     # ── 获取推理用融合均值（论文 eq.10）──────────────────────────────────────

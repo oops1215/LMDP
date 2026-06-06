@@ -388,12 +388,13 @@ def train_fold(fold_idx:    int,
         c_mri_cond = train_log.get("contrib_mri_cond", 0.0)
         c_pet_cond = train_log.get("contrib_pet_cond", 0.0)
         mem_str = f" GPU={mem_used:.1f}/{mem_total:.0f}GB" if device == "cuda" else ""
+        from config import Config as _C
         print(f"  Epoch {epoch:3d}/{Config.NUM_EPOCHS} "
               f"| loss={train_log['loss']:.4f} "
               f"lp={train_log['lp']:.4f} "
               f"li={train_log['li']:.4f} "
               f"lf={train_log['lf']:.4f}"
-              f"(rec={train_log['lf_recon']:.4f} kl={train_log['lf_kl']:.2f}) "
+              f"(wrec={train_log['lf_recon']*_C.RECON_WEIGHT:.4f} kl={train_log['lf_kl']:.2f}) "
               f"laux={train_log.get('l_aux', 0):.4f} "
               f"| MRI={train_log['contrib_mri']:.1%}(↑{c_mri_cond:.0%}) "
               f"PET={train_log['contrib_pet']:.1%}(↑{c_pet_cond:.0%}) "

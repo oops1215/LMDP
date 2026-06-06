@@ -73,6 +73,11 @@ class Config:
     # causing posterior collapse. β=0.001 rebalances so reconstruction dominates.
     KL_WEIGHT     = 0.001
 
+    # Reconstruction loss weight. Default rec≈0.009 << lp≈0.8, encoder barely
+    # feels reconstruction gradient. RECON_WEIGHT=50 brings rec to ~0.45,
+    # forcing encoder to actually retain image information in z.
+    RECON_WEIGHT  = 50.0
+
     WEIGHT_DECAY  = 1e-4   # L2 regularization in Adam
     DROPOUT       = 0.3    # dropout before prediction heads
 
