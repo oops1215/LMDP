@@ -101,6 +101,9 @@ def evaluate_fold(model,
     all_bio_true, all_bio_pred, all_bio_mask = [], [], []
     total_loss = 0.0
     n_batches  = 0
+    # per-step 统计：step_correct[t] / step_total[t]
+    step_correct = {}
+    step_total   = {}
 
     with torch.no_grad():
         for batch in loader:
@@ -136,6 +139,9 @@ def evaluate_fold(model,
                     all_true.append(label)
                     all_pred.append(pred)
                     all_prob.append(prob)
+                    # per-step 统计（t 表示预测源时间步）
+                    step_correct[t] = step_correct.get(t, 0) + int(pred == label)
+                    step_total[t]   = step_total.get(t, 0) + 1
 
                 # 生物标志物插补评估（仅对实测值）
                 for t in range(min(L, T)):
@@ -156,6 +162,11 @@ def evaluate_fold(model,
         y_prob = np.array(all_prob)
         cls_metrics = compute_classification_metrics(y_true, y_pred, y_prob)
         metrics.update(cls_metrics)
+
+    # per-step 准确率
+    metrics["step_acc"] = {t: step_correct[t] / step_total[t]
+                           for t in sorted(step_total.keys())}
+    metrics["step_n"]   = {t: step_total[t] for t in sorted(step_total.keys())}
 
     # 生物标志物插补指标
     if all_bio_true:
