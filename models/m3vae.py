@@ -65,7 +65,7 @@ class ImageEncoder3D(nn.Module):
         h = h.view(h.size(0), -1)
         h = self.fc(h)
         mu     = self.fc_mu(h)
-        logvar = self.fc_logvar(h).clamp(-4.0, 2.0)
+        logvar = self.fc_logvar(h).clamp(-4.0, 0.0)
         return mu, logvar
 
 
