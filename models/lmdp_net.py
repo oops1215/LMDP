@@ -127,6 +127,10 @@ class LMDPNet(nn.Module):
         self.pred_dx  = nn.Linear(hidden_dim, num_classes)
         self.pred_bio = nn.Linear(hidden_dim, biomarker_dim)
 
+        # 辅助图像判别头：强迫 fused_mu 学习与诊断相关的特征
+        # 直接从图像潜在向量预测诊断，权重 IMG_AUX_WEIGHT 控制强度
+        self.img_aux_head = nn.Linear(latent_dim, num_classes)
+
     # ── 辅助：从批次中提取某时间步的图像 ──────────────────────────────────────
     @staticmethod
     def _extract_step(tensor_or_none: Optional[torch.Tensor],
@@ -155,6 +159,8 @@ class LMDPNet(nn.Module):
         all_contribs  = []
         recon_logs    = []    # avg recon per step (logging)
         kl_logs       = []    # avg raw KL per step (logging)
+        all_fused_mu  = []    # 收集各步 fused_mu，用于辅助图像分类损失
+        all_img_avail = []    # 对应步骤是否有图像（有图才算辅助损失）
 
         h = torch.zeros(B, self.hidden_dim, device=device)
         c = torch.zeros(B, self.hidden_dim, device=device)
@@ -174,6 +180,8 @@ class LMDPNet(nn.Module):
                 all_contribs.append(contribs)
                 recon_logs.append(recon)
                 kl_logs.append(kl)
+                all_fused_mu.append(fused_mu)
+                all_img_avail.append((mri_av | pet_av))   # 该步骤是否有任意图像
             else:
                 fused_mu = self.m3vae.get_fused_mu(mri_t, pet_t, mri_av, pet_av)
 
@@ -226,8 +234,14 @@ class LMDPNet(nn.Module):
         # L_f：VAE 损失（论文 eq.29 中的 L_f）
         lf = torch.stack(vae_losses).mean() if vae_losses else torch.tensor(0.0, device=device)
 
-        # L_total = L_p + L_i + L_f（论文 eq.27，等权重）
-        total = lp + li + lf
+        # L_aux：图像辅助判别损失
+        # 直接从 fused_mu 预测当前诊断，强迫编码器学判别性特征
+        # 只对有图像且诊断标签有效的时间步计算
+        l_aux = self._compute_img_aux(all_fused_mu, all_img_avail, dx_seq, lengths, T)
+
+        # L_total = L_p + L_i + L_f + α·L_aux
+        IMG_AUX_WEIGHT = 0.5
+        total = lp + li + lf + IMG_AUX_WEIGHT * l_aux
 
         # 各模态平均贡献率（跨时间步平均，contribs 为 5 元组）
         if all_contribs:
@@ -249,6 +263,7 @@ class LMDPNet(nn.Module):
             "lp"               : lp.item(),
             "li"               : li.item(),
             "lf"               : lf.item(),
+            "l_aux"            : l_aux.item(),
             "lf_recon"         : avg_recon,
             "lf_kl"            : avg_kl,
             "dx_preds"         : dx_logits_seq,
@@ -311,6 +326,39 @@ class LMDPNet(nn.Module):
         if losses:
             return torch.stack(losses).mean()
         return non_img_seq.sum() * 0.0  # 全缺失时返回可微分的零
+
+    # ── 图像辅助判别损失 ──────────────────────────────────────────────────────
+    def _compute_img_aux(self,
+                         fused_mu_list: list,    # T × (B, latent_dim)
+                         img_avail_list: list,   # T × (B,) bool
+                         dx_seq: torch.Tensor,   # (B, T)
+                         lengths: torch.Tensor,
+                         T: int) -> torch.Tensor:
+        """
+        对有图像（MRI 或 PET）且诊断标签有效的时间步，
+        直接从 fused_mu 预测当前诊断，形成辅助分类损失。
+        这迫使图像编码器学习判别性特征，而不只依赖重建。
+        """
+        losses = []
+        for t in range(T):
+            fused_mu_t = fused_mu_list[t]          # (B, latent_dim)
+            img_av_t   = img_avail_list[t]          # (B,) bool
+            if not img_av_t.any():
+                continue
+            for b in range(fused_mu_t.shape[0]):
+                if not img_av_t[b]:
+                    continue
+                label = dx_seq[b, t].item()
+                if label < 0 or t >= int(lengths[b].item()):
+                    continue
+                logits = self.img_aux_head(fused_mu_t[b].unsqueeze(0))
+                losses.append(F.cross_entropy(
+                    logits,
+                    torch.tensor([label], device=fused_mu_t.device, dtype=torch.long)
+                ))
+        if losses:
+            return torch.stack(losses).mean()
+        return fused_mu_list[0].sum() * 0.0
 
 
 # ─── 简单单步推理接口 ────────────────────────────────────────────────────────

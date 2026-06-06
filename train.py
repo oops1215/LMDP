@@ -57,7 +57,7 @@ def train_epoch(model: LMDPNet,
                 load_images: bool = True,
                 scaler=None) -> Dict:
     model.train()
-    total_loss = lp_sum = li_sum = lf_sum = 0.0
+    total_loss = lp_sum = li_sum = lf_sum = laux_sum = 0.0
     recon_sum = kl_sum = 0.0
     c_mri_sum = c_pet_sum = c_prior_sum = 0.0
     c_mri_cond_sum = c_pet_cond_sum = 0.0
@@ -114,6 +114,7 @@ def train_epoch(model: LMDPNet,
         lp_sum         += out["lp"]
         li_sum         += out["li"]
         lf_sum         += out["lf"]
+        laux_sum       += out.get("l_aux",            0.0)
         recon_sum      += out.get("lf_recon",         0.0)
         kl_sum         += out.get("lf_kl",            0.0)
         c_mri_sum      += out.get("contrib_mri",      0.0)
@@ -129,6 +130,7 @@ def train_epoch(model: LMDPNet,
         "lp"               : lp_sum / nb,
         "li"               : li_sum / nb,
         "lf"               : lf_sum / nb,
+        "l_aux"            : laux_sum / nb,
         "lf_recon"         : recon_sum / nb,
         "lf_kl"            : kl_sum / nb,
         "contrib_mri"      : c_mri_sum / nb,
@@ -392,6 +394,7 @@ def train_fold(fold_idx:    int,
               f"li={train_log['li']:.4f} "
               f"lf={train_log['lf']:.4f}"
               f"(rec={train_log['lf_recon']:.4f} kl={train_log['lf_kl']:.2f}) "
+              f"laux={train_log.get('l_aux', 0):.4f} "
               f"| MRI={train_log['contrib_mri']:.1%}(↑{c_mri_cond:.0%}) "
               f"PET={train_log['contrib_pet']:.1%}(↑{c_pet_cond:.0%}) "
               f"prior={train_log['contrib_prior']:.1%} "
