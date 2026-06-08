@@ -14,8 +14,8 @@ class Config:
 
     # ─── Visit schedule ───────────────────────────────────────────────────────
     # Paper uses M0, M12, M24, M36, M48, M60
-    VISIT_CODES = ["bl", "m12", "m24", "m36", "m48", "m60"]
-    VISIT_MONTHS = {"bl": 0, "m12": 12, "m24": 24, "m36": 36, "m48": 48, "m60": 60}
+    VISIT_CODES = ["bl", "m06", "m12", "m18", "m24", "m30", "m36", "m42", "m48", "m54", "m60"]
+    VISIT_MONTHS = {"bl": 0, "m06": 6, "m12": 12, "m18": 18, "m24": 24, "m30": 30, "m36": 36, "m42": 42, "m48": 48, "m54": 54, "m60": 60}
 
     # ─── Diagnosis ────────────────────────────────────────────────────────────
     # Map ADNIMERGE DX column to integers
@@ -67,7 +67,7 @@ class Config:
     NUM_EPOCHS       = 100
     K_FOLDS          = 5
     SEED             = 42
-    MAX_SEQ_LEN      = 6   # max 6 visits (M0–M60)
+    MAX_SEQ_LEN      = 11  # max 11 visits (M0–M60 including intermediate)
     DX_MASK_PROB     = 0.5  # probability of masking current-visit diagnosis during training
 
     # KL weight in VAE loss (β-VAE).
