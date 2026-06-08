@@ -60,13 +60,15 @@ class Config:
     LSTM_INPUT_DIM = LATENT_DIM + NON_IMG_DIM   # 269
 
     # ─── Training ─────────────────────────────────────────────────────────────
-    LEARNING_RATE = 0.002
-    BATCH_SIZE    = 2     # 保守值，WSL2 CUDA 稳定性问题下优先保证训练可运行
-    NUM_EPOCHS    = 100
-    K_FOLDS       = 5
-    SEED          = 42
-    MAX_SEQ_LEN   = 6   # max 6 visits (M0–M60)
-    DX_MASK_PROB  = 0.5  # probability of masking current-visit diagnosis during training
+    LEARNING_RATE    = 0.002
+    BATCH_SIZE       = 4      # 2→4，显存约 2.6→5GB（8GB 总量仍有余量）
+    GRAD_ACCUM_STEPS = 2      # 有效 batch = BATCH_SIZE × GRAD_ACCUM_STEPS = 8
+    USE_CHECKPOINT   = True   # 3D CNN 梯度检查点（以计算换显存）
+    NUM_EPOCHS       = 100
+    K_FOLDS          = 5
+    SEED             = 42
+    MAX_SEQ_LEN      = 6   # max 6 visits (M0–M60)
+    DX_MASK_PROB     = 0.5  # probability of masking current-visit diagnosis during training
 
     # KL weight in VAE loss (β-VAE).
     # At init, KL term (~24.7) is ~500x larger than recon (~0.05),

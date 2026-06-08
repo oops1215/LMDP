@@ -37,16 +37,21 @@ class ImageEncoder3D(nn.Module):
     Flatten → 20480 → Linear → (μ, log_σ) ∈ R^{latent_dim}
     """
 
-    def __init__(self, latent_dim: int = Config.LATENT_DIM):
+    def __init__(self, latent_dim: int = Config.LATENT_DIM,
+                 use_checkpoint: bool = False):
         super().__init__()
+        self.use_checkpoint = use_checkpoint
         chs = Config.IMG_CNN_CHANNELS  # [32, 64, 128, 256, 256]
-        self.encoder = nn.Sequential(
-            nn.Conv3d(1,      chs[0], 3, stride=2, padding=1), nn.BatchNorm3d(chs[0]), nn.LeakyReLU(0.2),
-            nn.Conv3d(chs[0], chs[1], 3, stride=2, padding=1), nn.BatchNorm3d(chs[1]), nn.LeakyReLU(0.2),
-            nn.Conv3d(chs[1], chs[2], 3, stride=2, padding=1), nn.BatchNorm3d(chs[2]), nn.LeakyReLU(0.2),
-            nn.Conv3d(chs[2], chs[3], 3, stride=2, padding=1), nn.BatchNorm3d(chs[3]), nn.LeakyReLU(0.2),
-            nn.Conv3d(chs[3], chs[4], 3, stride=2, padding=1), nn.BatchNorm3d(chs[4]), nn.LeakyReLU(0.2),
-        )
+        self.conv1 = nn.Sequential(
+            nn.Conv3d(1,      chs[0], 3, stride=2, padding=1), nn.BatchNorm3d(chs[0]), nn.LeakyReLU(0.2))
+        self.conv2 = nn.Sequential(
+            nn.Conv3d(chs[0], chs[1], 3, stride=2, padding=1), nn.BatchNorm3d(chs[1]), nn.LeakyReLU(0.2))
+        self.conv3 = nn.Sequential(
+            nn.Conv3d(chs[1], chs[2], 3, stride=2, padding=1), nn.BatchNorm3d(chs[2]), nn.LeakyReLU(0.2))
+        self.conv4 = nn.Sequential(
+            nn.Conv3d(chs[2], chs[3], 3, stride=2, padding=1), nn.BatchNorm3d(chs[3]), nn.LeakyReLU(0.2))
+        self.conv5 = nn.Sequential(
+            nn.Conv3d(chs[3], chs[4], 3, stride=2, padding=1), nn.BatchNorm3d(chs[4]), nn.LeakyReLU(0.2))
         # After 5× stride-2: 4×5×4 spatial, chs[4] channels
         self.bottleneck_size = chs[4] * 4 * 5 * 4  # 20480
         self.fc = nn.Sequential(
@@ -56,12 +61,24 @@ class ImageEncoder3D(nn.Module):
         self.fc_mu     = nn.Linear(1024, latent_dim)
         self.fc_logvar = nn.Linear(1024, latent_dim)
 
+    def _run_encoder(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.conv1(x)
+        h = self.conv2(h)
+        h = self.conv3(h)
+        h = self.conv4(h)
+        h = self.conv5(h)
+        return h
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         x : (B, 1, 128, 160, 128)
         返回: (μ, log_σ²)，各 shape = (B, latent_dim)
         """
-        h = self.encoder(x)
+        if self.use_checkpoint and self.training:
+            h = torch.utils.checkpoint.checkpoint(
+                self._run_encoder, x, use_reentrant=False)
+        else:
+            h = self._run_encoder(x)
         h = h.view(h.size(0), -1)
         h = self.fc(h)
         mu     = self.fc_mu(h)
@@ -175,11 +192,12 @@ class M3VAE(nn.Module):
       - 推理时：返回融合均值 (B, latent_dim)，用于下游 LSTM
     """
 
-    def __init__(self, latent_dim: int = Config.LATENT_DIM):
+    def __init__(self, latent_dim: int = Config.LATENT_DIM,
+                 use_checkpoint: bool = Config.USE_CHECKPOINT):
         super().__init__()
         self.latent_dim  = latent_dim
-        self.mri_encoder = ImageEncoder3D(latent_dim)
-        self.pet_encoder = ImageEncoder3D(latent_dim)
+        self.mri_encoder = ImageEncoder3D(latent_dim, use_checkpoint=use_checkpoint)
+        self.pet_encoder = ImageEncoder3D(latent_dim, use_checkpoint=use_checkpoint)
         self.mri_decoder = ImageDecoder3D(latent_dim)
         self.pet_decoder = ImageDecoder3D(latent_dim)
 

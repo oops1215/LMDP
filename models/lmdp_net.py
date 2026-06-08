@@ -101,11 +101,12 @@ class LMDPNet(nn.Module):
     """
 
     def __init__(self,
-                 latent_dim:   int = Config.LATENT_DIM,
-                 hidden_dim:   int = Config.HIDDEN_DIM,
-                 non_img_dim:  int = Config.NON_IMG_DIM,
-                 num_classes:  int = Config.NUM_CLASSES,
-                 biomarker_dim: int = Config.BIOMARKER_DIM):
+                 latent_dim:    int = Config.LATENT_DIM,
+                 hidden_dim:    int = Config.HIDDEN_DIM,
+                 non_img_dim:   int = Config.NON_IMG_DIM,
+                 num_classes:   int = Config.NUM_CLASSES,
+                 biomarker_dim: int = Config.BIOMARKER_DIM,
+                 use_checkpoint: bool = Config.USE_CHECKPOINT):
         super().__init__()
         self.latent_dim    = latent_dim
         self.hidden_dim    = hidden_dim
@@ -114,7 +115,7 @@ class LMDPNet(nn.Module):
         self.biomarker_dim = biomarker_dim
 
         # 模块
-        self.m3vae      = M3VAE(latent_dim)
+        self.m3vae      = M3VAE(latent_dim, use_checkpoint=use_checkpoint)
         self.imputation = ImputationModule(hidden_dim, non_img_dim, biomarker_dim)
         self.irlstm     = IRLSTM(
             input_dim  = latent_dim + non_img_dim,  # 269

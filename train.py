@@ -55,7 +55,8 @@ def train_epoch(model: LMDPNet,
                 optimizer: torch.optim.Optimizer,
                 device: str,
                 load_images: bool = True,
-                scaler=None) -> Dict:
+                scaler=None,
+                grad_accum_steps: int = 1) -> Dict:
     model.train()
     total_loss = lp_sum = li_sum = lf_sum = laux_sum = 0.0
     recon_sum = kl_sum = 0.0
@@ -63,54 +64,52 @@ def train_epoch(model: LMDPNet,
     c_mri_cond_sum = c_pet_cond_sum = 0.0
     n_batches = 0
 
-    for batch in tqdm(loader, desc="  Train", leave=False):
+    optimizer.zero_grad(set_to_none=True)
+
+    for batch_idx, batch in enumerate(tqdm(loader, desc="  Train", leave=False)):
         batch = _to_device(batch, device, load_images)
         batch = _mask_current_dx(batch, Config.DX_MASK_PROB)
 
-        # 检查输入数据是否含 NaN/Inf（定位损坏样本）
-        for key in ("mri", "pet", "x"):
-            val = batch.get(key)
-            if val is not None and isinstance(val, torch.Tensor):
-                if not torch.isfinite(val).all():
-                    print(f"\n  [数据异常] batch['{key}'] 含 NaN/Inf，"
-                          f"batch_idx={n_batches}  "
-                          f"nan={torch.isnan(val).sum().item()}  "
-                          f"inf={torch.isinf(val).sum().item()}")
-
-        optimizer.zero_grad()
+        is_accum_step = ((batch_idx + 1) % grad_accum_steps == 0)
+        is_last_batch = (batch_idx == len(loader) - 1)
 
         try:
             if scaler is not None:
                 with torch.amp.autocast('cuda'):
                     out = model(batch, is_training=True)
-                    loss = out["total_loss"]
+                    loss = out["total_loss"] / grad_accum_steps
                 if torch.isnan(loss) or torch.isinf(loss):
                     print(f"\n  [警告] loss={loss.item():.4f}，跳过该 batch")
-                    scaler.update()
+                    if is_accum_step or is_last_batch:
+                        scaler.update()
                     continue
                 scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-                scaler.step(optimizer)
-                scaler.update()
+                if is_accum_step or is_last_batch:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
             else:
                 out = model(batch, is_training=True)
-                loss = out["total_loss"]
+                loss = out["total_loss"] / grad_accum_steps
                 if torch.isnan(loss) or torch.isinf(loss):
                     print(f"\n  [警告] loss={loss.item():.4f}，跳过该 batch")
                     continue
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-                optimizer.step()
+                if is_accum_step or is_last_batch:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
         except RuntimeError as e:
             if "out of memory" in str(e) or "CUDA error" in str(e):
                 print(f"\n  [OOM/CUDA错误] {e}\n  释放显存后继续...")
                 torch.cuda.empty_cache()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 continue
             raise
 
-        total_loss     += loss.item()
+        total_loss     += loss.item() * grad_accum_steps   # 还原为未缩放的 loss 用于日志
         lp_sum         += out["lp"]
         li_sum         += out["li"]
         lf_sum         += out["lf"]
@@ -314,11 +313,12 @@ def train_fold(fold_idx:    int,
     # latent_dim 始终保持 Config.LATENT_DIM；
     # 不使用图像时 M3VAE 的 fused_mu 会自动返回全零，不影响架构
     model = LMDPNet(
-        latent_dim    = Config.LATENT_DIM,
-        hidden_dim    = Config.HIDDEN_DIM,
-        non_img_dim   = Config.NON_IMG_DIM,
-        num_classes   = Config.NUM_CLASSES,
-        biomarker_dim = Config.BIOMARKER_DIM,
+        latent_dim     = Config.LATENT_DIM,
+        hidden_dim     = Config.HIDDEN_DIM,
+        non_img_dim    = Config.NON_IMG_DIM,
+        num_classes    = Config.NUM_CLASSES,
+        biomarker_dim  = Config.BIOMARKER_DIM,
+        use_checkpoint = Config.USE_CHECKPOINT,
     ).to(device)
 
     optimizer = optim.Adam(model.parameters(),
@@ -350,7 +350,9 @@ def train_fold(fold_idx:    int,
         else:
             Config.KL_WEIGHT = args.kl_weight
 
-        train_log = train_epoch(model, train_loader, optimizer, device, args.load_images, scaler)
+        train_log = train_epoch(model, train_loader, optimizer, device,
+                                args.load_images, scaler,
+                                grad_accum_steps=Config.GRAD_ACCUM_STEPS)
         if device == "cuda":
             torch.cuda.empty_cache()
         val_metrics = evaluate_fold(model, val_loader, device, args.load_images)
@@ -447,24 +449,33 @@ def main():
     parser.add_argument("--no_images",   action="store_true",
                         help="不使用图像特征（只用表格数据，快速调试）")
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--device",      type=str,
-                        default=Config.DEVICE)
+    parser.add_argument("--device",      type=str, default=Config.DEVICE)
     parser.add_argument("--kl_weight",   type=float, default=Config.KL_WEIGHT,
                         help="β-VAE KL 权重（论文推荐范围 0.001–0.1）")
     parser.add_argument("--filter_no_image", action="store_true",
                         help="过滤掉所有访次均无图像的受试者")
     parser.add_argument("--kl_warmup_epochs", type=int, default=20,
                         help="KL 权重从 0 线性增长到 --kl_weight 所需的 epoch 数（0=不做 warmup）")
-    parser.add_argument("--no_amp", action="store_true",
+    parser.add_argument("--no_amp",       action="store_true",
                         help="禁用混合精度（AMP），用 FP32 训练，排查 CUDA 数值问题")
+    parser.add_argument("--batch_size",   type=int, default=Config.BATCH_SIZE)
+    parser.add_argument("--grad_accum",   type=int, default=Config.GRAD_ACCUM_STEPS)
+    parser.add_argument("--no_checkpoint", action="store_true",
+                        help="禁用梯度检查点（更快但显存占用更大）")
     args = parser.parse_args()
     args.load_images = not args.no_images
-    Config.KL_WEIGHT = args.kl_weight
+    Config.KL_WEIGHT        = args.kl_weight
+    Config.BATCH_SIZE       = args.batch_size
+    Config.GRAD_ACCUM_STEPS = args.grad_accum
+    Config.USE_CHECKPOINT   = not args.no_checkpoint
 
     torch.manual_seed(Config.SEED)
     np.random.seed(Config.SEED)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(Config.SEED)
+        torch.backends.cudnn.benchmark    = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32   = True
 
     device = args.device
     print(f"使用设备: {device}")
@@ -518,7 +529,7 @@ def _to_device(batch: dict, device: str, load_images: bool) -> dict:
     result = {}
     for k, v in batch.items():
         if isinstance(v, torch.Tensor):
-            result[k] = v.to(device)
+            result[k] = v.to(device, non_blocking=True)
         else:
             result[k] = v
     if not load_images:

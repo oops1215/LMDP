@@ -264,12 +264,17 @@ def build_dataloaders(processed_data_path: str = Config.TAB_PROCESSED_PATH,
                             train_scaler["bio"], train_scaler["age"], train_scaler["edu"],
                             load_images=load_images)
 
+    _pw = num_workers > 0
     train_loader = DataLoader(train_ds, batch_size=batch_size,
                                shuffle=True, collate_fn=collate_fn,
-                               num_workers=num_workers, pin_memory=False)
+                               num_workers=num_workers, pin_memory=True,
+                               prefetch_factor=(2 if _pw else None),
+                               persistent_workers=_pw)
     val_loader   = DataLoader(val_ds, batch_size=batch_size,
                                shuffle=False, collate_fn=collate_fn,
-                               num_workers=num_workers, pin_memory=False)
+                               num_workers=num_workers, pin_memory=True,
+                               prefetch_factor=(2 if _pw else None),
+                               persistent_workers=_pw)
 
     print(f"Fold {fold_idx}: train={len(train_ptids)}, val={len(val_ptids)}")
     return train_loader, val_loader
