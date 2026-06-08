@@ -73,7 +73,7 @@ class Config:
     # KL weight in VAE loss (β-VAE).
     # At init, KL term (~24.7) is ~500x larger than recon (~0.05),
     # causing posterior collapse. β=0.001 rebalances so reconstruction dominates.
-    KL_WEIGHT     = 0.0003  # 降低 KL 压力，减少 posterior collapse 驱动力
+    KL_WEIGHT     = 0.001
 
     # Reconstruction loss weight. Default rec≈0.009 << lp≈0.8, encoder barely
     # feels reconstruction gradient. RECON_WEIGHT=50 brings rec to ~0.45,
