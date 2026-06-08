@@ -82,7 +82,7 @@ class ImageEncoder3D(nn.Module):
         h = h.view(h.size(0), -1)
         h = self.fc(h)
         mu     = self.fc_mu(h)
-        logvar = self.fc_logvar(h).clamp(-4.0, 0.0)
+        logvar = self.fc_logvar(h).clamp(-4.0, -1.5)  # 上界 -1.5 → 精度≥exp(1.5)≈4.5x先验，防后验坍塌
         return mu, logvar
 
 
@@ -352,9 +352,24 @@ class M3VAE(nn.Module):
         else:
             avg_recon_loss = next(self.mri_decoder.parameters()).sum() * 0.0
 
+        # ── 3. 贡献率下限惩罚（防止后验坍塌）────────────────────────────────
+        # 惩罚图像条件贡献率低于 40% 的情况，直接对 logvar 产生梯度
+        contrib_loss = torch.zeros(1, device=avg_recon_loss.device)
+        if mri_avail.any():
+            T_m = torch.exp(-mri_logvar[mri_avail])
+            T_p = torch.exp(-pet_logvar[mri_avail]) * pet_avail[mri_avail].float().unsqueeze(1)
+            c_mri_cond = (T_m / (1.0 + T_m + T_p)).mean()
+            contrib_loss = contrib_loss + F.relu(0.4 - c_mri_cond)
+        if pet_avail.any():
+            T_p = torch.exp(-pet_logvar[pet_avail])
+            T_m = torch.exp(-mri_logvar[pet_avail]) * mri_avail[pet_avail].float().unsqueeze(1)
+            c_pet_cond = (T_p / (1.0 + T_m + T_p)).mean()
+            contrib_loss = contrib_loss + F.relu(0.4 - c_pet_cond)
+
         # RECON_WEIGHT 放大重建损失，使 encoder 被迫在 z 中保留图像信息
         # 不加权时 rec≈0.009 远小于 lp≈0.8，encoder 几乎感受不到重建梯度
-        total = Config.RECON_WEIGHT * avg_recon_loss + Config.KL_WEIGHT * kl_reg
+        CONTRIB_FLOOR_WEIGHT = 0.5
+        total = Config.RECON_WEIGHT * avg_recon_loss + Config.KL_WEIGHT * kl_reg + CONTRIB_FLOOR_WEIGHT * contrib_loss
         return total, avg_recon_loss.detach().item(), kl_reg.detach().item()
 
     # ── 获取推理用融合均值（论文 eq.10）──────────────────────────────────────

@@ -241,7 +241,7 @@ class LMDPNet(nn.Module):
         l_aux = self._compute_img_aux(all_fused_mu, all_img_avail, dx_seq, lengths, T)
 
         # L_total = L_p + L_i + L_f + α·L_aux
-        IMG_AUX_WEIGHT = 0.5
+        IMG_AUX_WEIGHT = 1.5  # 提高到 1.5，强迫 fused_mu 编码更多诊断信息
         total = lp + li + lf + IMG_AUX_WEIGHT * l_aux
 
         # 各模态平均贡献率（跨时间步平均，contribs 为 5 元组）
