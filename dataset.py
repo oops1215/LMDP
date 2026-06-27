@@ -1,4 +1,5 @@
 """
+PyTorch Dataset/DataLoader，变长序列打包，K-fold 划分
 PyTorch Dataset for LMDP-Net
 
 __getitem__ 返回的 sample 包含：
@@ -21,6 +22,7 @@ collate_fn 将 batch 打包为：
 
 import os
 import pickle
+from collections import OrderedDict
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -54,7 +56,8 @@ class ADNIDataset(Dataset):
                  age_scaler:    StandardScaler,
                  edu_scaler:    StandardScaler,
                  load_images:   bool = True,
-                 max_seq_len:   int  = Config.MAX_SEQ_LEN):
+                 max_seq_len:   int  = Config.MAX_SEQ_LEN,
+                 image_cache_size: int = Config.IMAGE_CACHE_SIZE):
         self.subjects    = subject_list
         self.data        = subject_data
         self.bio_scaler  = bio_scaler
@@ -62,6 +65,8 @@ class ADNIDataset(Dataset):
         self.edu_scaler  = edu_scaler
         self.load_images = load_images
         self.max_seq_len = max_seq_len
+        self.image_cache_size = max(0, int(image_cache_size))
+        self._image_cache = OrderedDict()
 
     def __len__(self) -> int:
         return len(self.subjects)
@@ -137,14 +142,21 @@ class ADNIDataset(Dataset):
             "length"      : T,
         }
 
-    @staticmethod
-    def _load_image(path: Optional[str]) -> Optional[np.ndarray]:
+    def _load_image(self, path: Optional[str]) -> Optional[np.ndarray]:
         """加载预处理后的 .npy 图像，返回 (1, 128, 160, 128) float32 数组。"""
         if path is None or not os.path.exists(path):
             return None
+        if self.image_cache_size > 0 and path in self._image_cache:
+            img = self._image_cache.pop(path)
+            self._image_cache[path] = img
+            return img
         img = np.load(path).astype(np.float32)
         if img.ndim == 3:
             img = img[np.newaxis]   # (1, D, H, W)
+        if self.image_cache_size > 0:
+            self._image_cache[path] = img
+            while len(self._image_cache) > self.image_cache_size:
+                self._image_cache.popitem(last=False)
         return img
 
 
@@ -216,9 +228,18 @@ def build_dataloaders(processed_data_path: str = Config.TAB_PROCESSED_PATH,
                       load_images: bool = True,
                       num_workers: int = 4,
                       seed: int = Config.SEED,
-                      filter_no_image: bool = False) -> Tuple[DataLoader, DataLoader]:
+                      filter_no_image: bool = False,
+                      filter_mri_subjects: bool = False,
+                      filter_matched_visits: bool = False,
+                      image_cache_size: int = Config.IMAGE_CACHE_SIZE) -> Tuple[DataLoader, DataLoader]:
     """
     构建 K-fold 的 train/val DataLoader。
+
+    参数
+    ----
+    filter_no_image       : 删除全无图像的受试者
+    filter_mri_subjects   : 只保留至少有一次 MRI 的受试者，但保留其所有访视（论文式 MRI cohort）
+    filter_matched_visits : 只保留既有Tabular又有MRI的访视（更激进的 visit-level 过滤）
 
     返回
     ----
@@ -237,12 +258,67 @@ def build_dataloaders(processed_data_path: str = Config.TAB_PROCESSED_PATH,
     edu_scaler   = packed["edu_scaler"]
 
     all_ptids = sorted(subject_data.keys())
+
+    # ─── 过滤策略 1: 删除全无图像的受试者 ────────────────────────────────────────
     if filter_no_image:
         before = len(all_ptids)
         all_ptids = [p for p in all_ptids
                      if any(v.get("mri_path") is not None or v.get("pet_path") is not None
                             for v in subject_data[p]["visits"])]
         print(f"filter_no_image: {before} → {len(all_ptids)} 受试者（删除 {before - len(all_ptids)} 个全无图像受试者）")
+
+    # ─── 过滤策略 1b: 论文式 MRI cohort：受试者至少有一次 MRI，但保留所有访视 ─────────
+    if filter_mri_subjects:
+        before = len(all_ptids)
+        total_visits_before = sum(len(subject_data[p]["visits"]) for p in all_ptids)
+        all_ptids = [p for p in all_ptids
+                     if any(v.get("mri_path") is not None
+                            for v in subject_data[p]["visits"])]
+        total_visits_after = sum(len(subject_data[p]["visits"]) for p in all_ptids)
+        total_mri_visits = sum(
+            1
+            for p in all_ptids
+            for v in subject_data[p]["visits"]
+            if v.get("mri_path") is not None
+        )
+        print("\n[MRI受试者过滤] 只保留至少有一次 MRI 的受试者，保留其所有访视...")
+        print(f"  受试者: {before} → {len(all_ptids)}（删除 {before - len(all_ptids)} 个无 MRI 受试者）")
+        print(f"  访视数: {total_visits_before} → {total_visits_after}")
+        print(f"  MRI访视: {total_mri_visits}/{total_visits_after} ({100*total_mri_visits/max(total_visits_after, 1):.2f}%)")
+        print("  MRI受试者覆盖率: 100%\n")
+
+    # ─── 过滤策略 2: 只保留既有Tabular又有MRI的访视 ────────────────────────────
+    if filter_matched_visits:
+        print("\n[覆盖率过滤] 只保留既有Tabular又有MRI的访视...")
+
+        total_visits_before = sum(len(subject_data[p]["visits"]) for p in all_ptids)
+        total_visits_after = 0
+        removed_subjects = 0
+
+        for subject_id in all_ptids:
+            subject = subject_data[subject_id]
+            original_visits = subject["visits"]
+
+            # 只保留有MRI的访视
+            filtered_visits = [v for v in original_visits if v.get("mri_path") is not None]
+
+            if len(filtered_visits) == 0:
+                # 这个受试者没有任何有MRI的访视，标记为删除
+                subject["visits"] = []
+                removed_subjects += 1
+            else:
+                subject["visits"] = filtered_visits
+
+            total_visits_after += len(filtered_visits)
+
+        # 删除完全没有有效访视的受试者
+        all_ptids = [p for p in all_ptids if len(subject_data[p]["visits"]) > 0]
+
+        print(f"  受试者: {len(all_ptids) + removed_subjects} → {len(all_ptids)} ({removed_subjects} 个无有效访视)")
+        print(f"  访视数: {total_visits_before} → {total_visits_after}")
+        print(f"  覆盖率: {total_visits_after/total_visits_before*100:.2f}% (保留)")
+        print(f"  MRI覆盖率: 100% (所有访视都有MRI)\n")
+
     np.random.shuffle(all_ptids)
 
     # 5-fold split
@@ -259,17 +335,24 @@ def build_dataloaders(processed_data_path: str = Config.TAB_PROCESSED_PATH,
 
     train_ds = ADNIDataset(train_ptids, subject_data,
                             train_scaler["bio"], train_scaler["age"], train_scaler["edu"],
-                            load_images=load_images)
+                            load_images=load_images,
+                            image_cache_size=image_cache_size)
     val_ds   = ADNIDataset(val_ptids,   subject_data,
                             train_scaler["bio"], train_scaler["age"], train_scaler["edu"],
-                            load_images=load_images)
+                            load_images=load_images,
+                            image_cache_size=image_cache_size)
 
+    _pw = num_workers > 0
     train_loader = DataLoader(train_ds, batch_size=batch_size,
                                shuffle=True, collate_fn=collate_fn,
-                               num_workers=num_workers, pin_memory=False)
+                               num_workers=num_workers, pin_memory=True,
+                               prefetch_factor=(2 if _pw else None),
+                               persistent_workers=_pw)
     val_loader   = DataLoader(val_ds, batch_size=batch_size,
                                shuffle=False, collate_fn=collate_fn,
-                               num_workers=num_workers, pin_memory=False)
+                               num_workers=num_workers, pin_memory=True,
+                               prefetch_factor=(2 if _pw else None),
+                               persistent_workers=_pw)
 
     print(f"Fold {fold_idx}: train={len(train_ptids)}, val={len(val_ptids)}")
     return train_loader, val_loader

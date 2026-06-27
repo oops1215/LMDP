@@ -83,6 +83,9 @@ def compute_classification_metrics(y_true: np.ndarray,
                                   multi_class="ovr", average="macro")
     except Exception:
         mauc = float("nan")
+    if not np.isfinite(mauc):
+        # 验证 fold 类别缺失或 sklearn AUC 失败时，避免 NaN 继续污染 LR scheduler/选模。
+        mauc = 0.0
 
     return {"acc": acc, "pre": pre, "rec": rec, "mauc": mauc}
 
@@ -101,6 +104,9 @@ def evaluate_fold(model,
     all_bio_true, all_bio_pred, all_bio_mask = [], [], []
     total_loss = 0.0
     n_batches  = 0
+    # per-step 统计：step_correct[t] / step_total[t]
+    step_correct = {}
+    step_total   = {}
 
     with torch.no_grad():
         for batch in loader:
@@ -136,6 +142,9 @@ def evaluate_fold(model,
                     all_true.append(label)
                     all_pred.append(pred)
                     all_prob.append(prob)
+                    # per-step 统计（t 表示预测源时间步）
+                    step_correct[t] = step_correct.get(t, 0) + int(pred == label)
+                    step_total[t]   = step_total.get(t, 0) + 1
 
                 # 生物标志物插补评估（仅对实测值）
                 for t in range(min(L, T)):
@@ -156,6 +165,11 @@ def evaluate_fold(model,
         y_prob = np.array(all_prob)
         cls_metrics = compute_classification_metrics(y_true, y_pred, y_prob)
         metrics.update(cls_metrics)
+
+    # per-step 准确率
+    metrics["step_acc"] = {t: step_correct[t] / step_total[t]
+                           for t in sorted(step_total.keys())}
+    metrics["step_n"]   = {t: step_total[t] for t in sorted(step_total.keys())}
 
     # 生物标志物插补指标
     if all_bio_true:
@@ -225,6 +239,95 @@ def evaluate_ablation(model,
     if not all_true:
         return 0.0
     return float(accuracy_score(all_true, all_pred))
+
+
+# ─── 真实图像增益消融（按源步有无图拆分）──────────────────────────────────
+# 旧 evaluate_ablation 在全体样本上算 acc，被 ~59% 无图样本稀释，ΔIMG 看不出来。
+# 这里只统计"源步 t 实际有图像"的预测样本，对比 full vs tab_only，
+# 得到图像对预测的真实增益 ΔIMG。这是替代"贡献率 proxy"的真实优化目标。
+
+def evaluate_image_gain(model,
+                        loader,
+                        device: str) -> Dict:
+    """
+    对验证集做真实图像增益消融，按源步是否有图像拆分统计准确率与 mAUC。
+
+    返回 dict:
+      acc_full_img / mauc_full_img : full 配置下、源步有图样本指标
+      acc_tab_img / mauc_tab_img   : tab_only 配置下、同一批有图样本指标
+      delta_img / delta_img_mauc   : full - tab_only（图像真实增益，关键指标）
+      acc_full_noimg               : full 配置下、源步无图样本 acc
+      n_img / n_noimg              : 两类样本数
+    """
+    def _run(no_img: bool):
+        model.eval()
+        t_img, p_img, prob_img = [], [], []
+        t_no, p_no = [], []
+        with torch.no_grad():
+            for batch in loader:
+                bd = {k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+                      for k, v in batch.items()}
+                orig_mod = bd["mod_avail"].clone()   # 用原始可用性判定"是否有图"
+                if no_img:
+                    bd.pop("mri_seq", None)
+                    bd.pop("pet_seq", None)
+                    ma = bd["mod_avail"].clone()
+                    ma[:, :, 0] = 0
+                    ma[:, :, 1] = 0
+                    bd["mod_avail"] = ma
+                out = model(bd, is_training=False)
+                logits = out["dx_preds"]
+                dx = bd["dx_seq"]
+                lengths = bd["lengths"]
+                B, T, _ = logits.shape
+                for b in range(B):
+                    L = int(lengths[b].item())
+                    for t in range(min(L - 1, T - 1)):
+                        lab = int(dx[b, t + 1].item())
+                        if lab < 0:
+                            continue
+                        prob = F.softmax(logits[b, t], dim=0).cpu().numpy()
+                        pred = int(prob.argmax())
+                        has = (orig_mod[b, t, 0] > 0) or (orig_mod[b, t, 1] > 0)
+                        if has:
+                            t_img.append(lab); p_img.append(pred); prob_img.append(prob)
+                        else:
+                            t_no.append(lab); p_no.append(pred)
+        return t_img, p_img, prob_img, t_no, p_no
+
+    ti_f, pi_f, probi_f, tn_f, pn_f = _run(no_img=False)   # full
+    ti_t, pi_t, probi_t, tn_t, pn_t = _run(no_img=True)    # tab_only
+
+    def _acc(yt, yp):
+        return float(accuracy_score(yt, yp)) if yt else float("nan")
+
+    def _mauc(yt, probs):
+        if not yt:
+            return float("nan")
+        return compute_classification_metrics(
+            np.array(yt),
+            np.array(probs).argmax(axis=1),
+            np.array(probs),
+        ).get("mauc", float("nan"))
+
+    acc_full_img = _acc(ti_f, pi_f)
+    acc_tab_img = _acc(ti_t, pi_t)
+    mauc_full_img = _mauc(ti_f, probi_f)
+    mauc_tab_img = _mauc(ti_t, probi_t)
+
+    return {
+        "acc_full_img"  : acc_full_img,
+        "acc_tab_img"   : acc_tab_img,
+        "delta_img"     : acc_full_img - acc_tab_img if ti_f and ti_t else float("nan"),
+        "mauc_full_img" : mauc_full_img,
+        "mauc_tab_img"  : mauc_tab_img,
+        "delta_img_mauc": mauc_full_img - mauc_tab_img
+                          if not math.isnan(mauc_full_img) and not math.isnan(mauc_tab_img)
+                          else float("nan"),
+        "acc_full_noimg": _acc(tn_f, pn_f),
+        "n_img"         : len(ti_f),
+        "n_noimg"       : len(tn_f),
+    }
 
 
 # ─── 打印指标 ─────────────────────────────────────────────────────────────────
